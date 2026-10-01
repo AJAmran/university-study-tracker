@@ -1,0 +1,6 @@
+{
+  "name": "UniMaster Pro",
+  "description": "Personal Academic Command Center & Study Productivity App for university students.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
