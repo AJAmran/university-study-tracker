@@ -1,24 +1,20 @@
 'use client';
 
 import React, { useState } from 'react';
-import { 
-  CheckSquare, 
-  Circle, 
-  CheckCircle2, 
-  Plus, 
-  Trash2, 
-  Filter, 
-  Calendar, 
-  Clock, 
-  AlertTriangle, 
-  Search,
-  ArrowUpDown,
-  Tag
+import {
+  CheckSquare,
+  Circle,
+  CheckCircle2,
+  Plus,
+  Trash2,
+  Calendar,
+  Search
 } from 'lucide-react';
-import { Course, TaskItem, TaskType, Priority, TaskStatus } from '@/types';
+import { Course, TaskItem } from '@/types';
 import { toggleTaskComplete, deleteTask } from '@/actions';
 import { getTaskUrgency } from '@/lib/calculations';
 import { fireConfetti } from '@/lib/confetti';
+import { useBusy } from '@/hooks/use-busy';
 
 type TaskTrackerProps = {
   courses: Course[];
@@ -40,19 +36,38 @@ export function TaskTracker({
   const [selectedType, setSelectedType] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  const handleToggle = async (id: string) => {
-    const res = await toggleTaskComplete(id);
-    if (res.success && res.task?.status === 'Completed') {
-      fireConfetti();
-    }
-    onRefresh();
-  };
+  const { run } = useBusy();
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Delete this task?')) {
-      await deleteTask(id);
+  const handleToggle = (id: string) => run(async () => {
+    try {
+      const res = await toggleTaskComplete(id);
+      if (!res.success) {
+        alert(res.error || 'Failed to update task');
+        return;
+      }
+      if (res.task?.status === 'Completed') {
+        fireConfetti();
+      }
       onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
     }
+  });
+
+  const handleDelete = (id: string) => {
+    if (!confirm('Delete this task?')) return;
+    run(async () => {
+      try {
+        const res = await deleteTask(id);
+        if (!res.success) {
+          alert(res.error || 'Failed to delete task');
+          return;
+        }
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
   };
 
   // Filter and sort tasks
@@ -61,7 +76,7 @@ export function TaskTracker({
 
     // Category filter
     if (filterCategory === 'today' && urgency.category !== 'today') return false;
-    if (filterCategory === 'upcoming' && (urgency.category === 'overdue' || task.status === 'Completed')) return false;
+    if (filterCategory === 'upcoming' && (urgency.category === 'overdue' || urgency.category === 'today' || urgency.category === 'completed' || task.status === 'Completed')) return false;
     if (filterCategory === 'overdue' && urgency.category !== 'overdue') return false;
     if (filterCategory === 'completed' && task.status !== 'Completed') return false;
 
@@ -76,7 +91,7 @@ export function TaskTracker({
       const q = searchQuery.toLowerCase();
       const course = courses.find((c) => c.id === task.courseId);
       const matchesTitle = task.title.toLowerCase().includes(q);
-      const matchesCourse = course?.code.toLowerCase().includes(q) || course?.name.toLowerCase().includes(q);
+      const matchesCourse = (course?.code || '').toLowerCase().includes(q) || (course?.name || '').toLowerCase().includes(q);
       const matchesDesc = (task.description || '').toLowerCase().includes(q);
       if (!matchesTitle && !matchesCourse && !matchesDesc) return false;
     }
@@ -88,7 +103,9 @@ export function TaskTracker({
   const sortedTasks = [...filteredTasks].sort((a, b) => {
     if (a.status === 'Completed' && b.status !== 'Completed') return 1;
     if (a.status !== 'Completed' && b.status === 'Completed') return -1;
-    return a.dueDate.localeCompare(b.dueDate);
+    const dateCmp = (a.dueDate || '').localeCompare(b.dueDate || '');
+    if (dateCmp !== 0) return dateCmp;
+    return (a.dueTime || '').localeCompare(b.dueTime || '');
   });
 
   // Count metrics for quick filter badges
@@ -165,6 +182,8 @@ export function TaskTracker({
             <option value="Quiz">Quiz</option>
             <option value="Lab">Lab Report</option>
             <option value="Presentation">Presentation</option>
+            <option value="Report">Report</option>
+            <option value="Other">Other</option>
           </select>
         </div>
       </div>

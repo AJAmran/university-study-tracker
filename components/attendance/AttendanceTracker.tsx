@@ -1,20 +1,17 @@
 'use client';
 
 import React, { useState } from 'react';
-import { 
-  UserCheck, 
-  AlertTriangle, 
-  CheckCircle, 
-  Plus, 
-  RotateCcw, 
-  TrendingUp, 
-  Settings, 
-  ShieldCheck,
-  Percent
+import {
+  UserCheck,
+  AlertTriangle,
+  Plus,
+  Settings,
+  ShieldCheck
 } from 'lucide-react';
 import { Course, CourseAttendance } from '@/types';
 import { calculateAttendanceStats } from '@/lib/calculations';
 import { recordAttendance, updateAttendanceTarget } from '@/actions';
+import { useBusy, todayLocalDate } from '@/hooks/use-busy';
 
 type AttendanceTrackerProps = {
   courses: Course[];
@@ -30,18 +27,40 @@ export function AttendanceTracker({
   const [editingTargetCourseId, setEditingTargetCourseId] = useState<string | null>(null);
   const [targetVal, setTargetVal] = useState<number>(75);
 
-  const handleRecord = async (courseId: string, status: 'present' | 'absent') => {
-    await recordAttendance(courseId, status);
-    onRefresh();
-  };
+  const { run } = useBusy();
 
-  const handleSaveTarget = async (courseId: string) => {
-    const res = await updateAttendanceTarget(courseId, targetVal);
-    if (!res.success) {
-      console.error(res.error);
+  const handleRecord = (courseId: string, status: 'present' | 'absent') => run(async () => {
+    try {
+      const res = await recordAttendance(courseId, status, todayLocalDate());
+      if (!res.success) {
+        alert(res.error || 'Failed to record attendance');
+        return;
+      }
+      onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
     }
-    setEditingTargetCourseId(null);
-    onRefresh();
+  });
+
+  const handleSaveTarget = (courseId: string) => {
+    const pct = Math.round(Number(targetVal));
+    if (!Number.isFinite(pct) || pct < 1 || pct > 100) {
+      alert('Target must be between 1 and 100');
+      return;
+    }
+    run(async () => {
+      try {
+        const res = await updateAttendanceTarget(courseId, pct);
+        if (!res.success) {
+          alert(res.error || 'Failed to update target');
+          return;
+        }
+        setEditingTargetCourseId(null);
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
   };
 
   // Overall attendance calculation across all courses
@@ -56,7 +75,7 @@ export function AttendanceTracker({
     if (stats.isWarning && a.totalClasses > 0) warningCount++;
   });
 
-  const overallPct = totalClassesAll > 0 ? Math.round((totalAttendedAll / totalClassesAll) * 100 * 10) / 10 : 100;
+  const overallPct = totalClassesAll > 0 ? Math.round((totalAttendedAll / totalClassesAll) * 100 * 10) / 10 : null;
 
   return (
     <div className="space-y-4">
@@ -76,8 +95,8 @@ export function AttendanceTracker({
         <div className="flex items-center gap-2">
           <div className="rounded-xl border border-zinc-200 bg-white px-3 py-1.5 shadow-2xs dark:border-zinc-800 dark:bg-zinc-900 flex items-center gap-2">
             <span className="text-xs text-zinc-500">Overall:</span>
-            <span className={`text-sm font-black ${overallPct >= 75 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
-              {overallPct}%
+            <span className={`text-sm font-black ${overallPct === null ? 'text-zinc-500' : overallPct >= 75 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+              {overallPct === null ? '—' : `${overallPct}%`}
             </span>
             <span className="text-[10px] text-zinc-400">({totalAttendedAll}/{totalClassesAll})</span>
           </div>
@@ -85,7 +104,7 @@ export function AttendanceTracker({
           {warningCount > 0 && (
             <div className="flex items-center gap-1 rounded-xl bg-rose-50 border border-rose-200 px-3 py-1.5 text-xs font-bold text-rose-600 dark:bg-rose-950/60 dark:border-rose-900 dark:text-rose-400">
               <AlertTriangle className="h-3.5 w-3.5" />
-              <span>{warningCount} Below 75%</span>
+              <span>{warningCount} Below target</span>
             </div>
           )}
         </div>

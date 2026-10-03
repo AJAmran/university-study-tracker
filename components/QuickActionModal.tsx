@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   X, 
   CheckSquare, 
@@ -20,6 +20,7 @@ import {
   createMaterial, 
   createNote 
 } from '@/actions';
+import { todayLocalDate } from '@/hooks/use-busy';
 
 type QuickActionModalProps = {
   isOpen: boolean;
@@ -48,7 +49,11 @@ export function QuickActionModal({
   const [taskCourseId, setTaskCourseId] = useState(courses[0]?.id || '');
   const [taskType, setTaskType] = useState<TaskType>('Assignment');
   const [taskPriority, setTaskPriority] = useState<Priority>('High');
-  const [taskDueDate, setTaskDueDate] = useState(new Date().toISOString().split('T')[0]);
+  const localToday = () => {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}`;
+  };
+  const [taskDueDate, setTaskDueDate] = useState(localToday());
   const [taskDueTime, setTaskDueTime] = useState('23:59');
   const [taskDesc, setTaskDesc] = useState('');
 
@@ -87,15 +92,59 @@ export function QuickActionModal({
   const [noteTopic, setNoteTopic] = useState('');
   const [noteContent, setNoteContent] = useState('');
 
+  // Sync when reopened with a different action or when courses load
+  useEffect(() => {
+    if (isOpen) {
+      setActiveType(initialAction);
+      setErrorMsg('');
+      const first = courses[0]?.id || '';
+      setTaskCourseId((v) => v || first);
+      setRotCourseId((v) => v || first);
+      setAttCourseId((v) => v || first);
+      setAssCourseId((v) => v || first);
+      setMatCourseId((v) => v || first);
+      setNoteCourseId((v) => v || first);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialAction]);
+
+  // Lock background scroll + Escape to close
+  useEffect(() => {
+    if (!isOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
+
+  const resetForms = () => {
+    setTaskTitle(''); setTaskDesc('');
+    setAssTitle('');
+    setMatTitle(''); setMatUrl(''); setMatTags(''); setMatDesc('');
+    setNoteTitle(''); setNoteTopic(''); setNoteContent('');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return; // re-entrancy guard: ignore double-Enter/double-tap
+    if (courses.length === 0) {
+      setErrorMsg('Add a course first before creating entries.');
+      return;
+    }
     setLoading(true);
     setErrorMsg('');
 
     try {
       if (activeType === 'task') {
+        if (!taskTitle.trim()) throw new Error('Task title is required');
         const res = await createTask({
           title: taskTitle,
           courseId: taskCourseId || courses[0]?.id,
@@ -108,6 +157,7 @@ export function QuickActionModal({
         });
         if (!res.success) throw new Error(res.error);
       } else if (activeType === 'routine') {
+        if (rotEndTime <= rotStartTime) throw new Error('End time must be after start time');
         const res = await createRoutineSlot({
           courseId: rotCourseId || courses[0]?.id,
           day: rotDay,
@@ -119,30 +169,38 @@ export function QuickActionModal({
         });
         if (!res.success) throw new Error(res.error);
       } else if (activeType === 'attendance') {
-        const res = await recordAttendance(attCourseId || courses[0]?.id, attStatus);
+        const res = await recordAttendance(attCourseId || courses[0]?.id, attStatus, todayLocalDate());
         if (!res.success) throw new Error(res.error);
       } else if (activeType === 'mark') {
+        const max = parseFloat(assMaxMarks);
+        const obtained = parseFloat(assObtainedMarks);
+        if (!Number.isFinite(max) || max < 1) throw new Error('Max marks must be at least 1');
+        if (!Number.isFinite(obtained) || obtained < 0 || obtained > max) throw new Error(`Obtained marks must be between 0 and ${max}`);
         const res = await addAssessment({
           courseId: assCourseId || courses[0]?.id,
           title: assTitle,
           category: assCategory,
-          maxMarks: parseFloat(assMaxMarks) || 20,
-          obtainedMarks: parseFloat(assObtainedMarks) || 0,
-          weightPercent: parseFloat(assWeight) || 10,
+          maxMarks: max,
+          obtainedMarks: obtained,
+          weightPercent: parseFloat(assWeight) || 0,
         });
         if (!res.success) throw new Error(res.error);
       } else if (activeType === 'material') {
+        if (!matTitle.trim()) throw new Error('Material title is required');
+        if (!matUrl.trim()) throw new Error('Resource link is required');
+        if (/^\s*(javascript|data|vbscript)\s*:/i.test(matUrl)) throw new Error('Invalid URL');
         const res = await createMaterial({
           title: matTitle,
           courseId: matCourseId || courses[0]?.id,
           type: matType,
-          url: matUrl,
-          tags: matTags.split(',').map((t) => t.trim()).filter(Boolean),
+          url: matUrl.trim(),
+          tags: Array.from(new Set(matTags.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean))).slice(0, 10),
           description: matDesc,
           isFavorite: false,
         });
         if (!res.success) throw new Error(res.error);
       } else if (activeType === 'note') {
+        if (!noteTitle.trim()) throw new Error('Note title is required');
         const res = await createNote({
           title: noteTitle,
           courseId: noteCourseId || courses[0]?.id,
@@ -155,6 +213,7 @@ export function QuickActionModal({
       }
 
       onRefresh();
+      resetForms();
       onClose();
     } catch (err: any) {
       setErrorMsg(err?.message || 'Failed to save entry');
@@ -173,10 +232,10 @@ export function QuickActionModal({
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center bg-black/60 sm:p-3 backdrop-blur-xs animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center sm:justify-center bg-black/60 sm:p-3 backdrop-blur-sm animate-fade-in" role="dialog" aria-modal="true" aria-label="Quick add">
       <div 
         className="fixed inset-0" 
-        onClick={onClose} 
+        onClick={() => { if (!loading) onClose(); }} 
         aria-hidden="true"
       />
       <div className="relative w-full max-w-lg max-h-[90vh] sm:max-h-[92vh] overflow-y-auto overscroll-contain rounded-t-3xl sm:rounded-2xl border border-zinc-200 bg-white p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900 transition-all">
@@ -194,6 +253,7 @@ export function QuickActionModal({
           </div>
           <button
             onClick={onClose}
+            aria-label="Close quick add"
             className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
           >
             <X className="h-5 w-5" />
@@ -285,6 +345,7 @@ export function QuickActionModal({
                     <option value="Project">Project</option>
                     <option value="Presentation">Presentation</option>
                     <option value="Lab">Lab Report</option>
+                    <option value="Report">Report</option>
                     <option value="Other">Other</option>
                   </select>
                 </div>
@@ -540,9 +601,12 @@ export function QuickActionModal({
                   >
                     <option value="CT">Class Test (CT)</option>
                     <option value="Assignment">Assignment</option>
+                    <option value="Quiz">Quiz</option>
                     <option value="Midterm">Midterm</option>
                     <option value="Final">Final Exam</option>
                     <option value="Lab">Lab Report / Viva</option>
+                    <option value="Viva">Viva</option>
+                    <option value="Presentation">Presentation</option>
                     <option value="Attendance">Attendance Mark</option>
                     <option value="Other">Other</option>
                   </select>
@@ -662,6 +726,7 @@ export function QuickActionModal({
                     <option value="GitHub">GitHub Repository</option>
                     <option value="Video">Video Lecture</option>
                     <option value="Lab Code">Lab Code</option>
+                    <option value="Assignment">Assignment</option>
                     <option value="External Link">External Link</option>
                   </select>
                 </div>
@@ -672,7 +737,7 @@ export function QuickActionModal({
                   Resource Link or File Path *
                 </label>
                 <input
-                  type="text"
+                  type="url"
                   required
                   placeholder="https://drive.google.com/... or https://github.com/..."
                   value={matUrl}

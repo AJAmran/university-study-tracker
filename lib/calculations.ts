@@ -12,12 +12,13 @@ export function calculateAttendanceStats(att: CourseAttendance): AttendanceStats
   // Postgres numeric columns can come back as strings; coerce here so the
   // comparisons below stay numeric rather than doing lexicographic compares.
   const totalClasses = Number(att.totalClasses) || 0;
-  const attended = Number(att.attended) || 0;
-  const requiredPercentage = Number(att.requiredPercentage) || 75;
+  const attended = Math.max(0, Number(att.attended) || 0);
+  const rawRequired = Number(att.requiredPercentage);
+  const requiredPercentage = Number.isFinite(rawRequired) ? Math.min(100, Math.max(1, rawRequired)) : 75;
 
   if (totalClasses === 0) {
     return {
-      percentage: 100,
+      percentage: 0,
       isWarning: false,
       classesNeededFor75: 0,
       maxCanMiss: 0,
@@ -25,7 +26,8 @@ export function calculateAttendanceStats(att: CourseAttendance): AttendanceStats
     };
   }
 
-  const percentage = Math.round((attended / totalClasses) * 100 * 10) / 10;
+  const safeAttended = Math.min(attended, totalClasses);
+  const percentage = Math.round((safeAttended / totalClasses) * 100 * 10) / 10;
   const isWarning = percentage < requiredPercentage;
 
   const targetRatio = requiredPercentage / 100;
@@ -34,11 +36,16 @@ export function calculateAttendanceStats(att: CourseAttendance): AttendanceStats
   let maxCanMiss = 0;
 
   if (percentage < requiredPercentage) {
+    if (requiredPercentage >= 100) {
+      // At a 100% target any miss can never be recovered; report the gap.
+      classesNeededFor75 = Math.max(0, Math.ceil(totalClasses - attended));
+    } else {
     // (attended + x) / (totalClasses + x) >= targetRatio
     // attended + x >= targetRatio * totalClasses + targetRatio * x
     // x * (1 - targetRatio) >= targetRatio * totalClasses - attended
     const needed = (targetRatio * totalClasses - attended) / (1 - targetRatio);
     classesNeededFor75 = Math.max(0, Math.ceil(needed));
+    }
   } else {
     // attended / (totalClasses + y) >= targetRatio
     // attended >= targetRatio * totalClasses + targetRatio * y
@@ -117,8 +124,8 @@ export function calculateCourseGrade(
   let weightedScoreSum = 0;
 
   for (const a of courseAssessments) {
-    if (a.maxMarks > 0) {
-      const scoreRatio = Math.min(1.2, a.obtainedMarks / a.maxMarks);
+    if (a.maxMarks > 0 && a.weightPercent >= 0) {
+      const scoreRatio = Math.min(1, Math.max(0, a.obtainedMarks / a.maxMarks));
       weightedScoreSum += scoreRatio * a.weightPercent;
       totalWeight += a.weightPercent;
     }
@@ -158,10 +165,10 @@ export function calculateSemesterGPA(
   let predictedGradePoints = 0;
 
   for (const course of courses) {
-    totalCredits += course.credit;
+    totalCredits += Number(course.credit) || 0;
     const stats = calculateCourseGrade(course.id, assessments);
     if (stats.assessmentsCount > 0) {
-      gradedCredits += course.credit;
+      gradedCredits += Number(course.credit) || 0;
       totalGradePoints += stats.gradeInfo.gradePoint * course.credit;
     }
     predictedGradePoints += stats.predictedGradeInfo.gradePoint * course.credit;
@@ -198,7 +205,24 @@ export function getTaskUrgency(task: TaskItem): {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const due = new Date(task.dueDate);
+  // Parse YYYY-MM-DD as a local calendar date (not UTC midnight) to avoid
+  // off-by-one urgency bugs in non-UTC timezones. Fall back to Date parse
+  // for ISO strings, and guard invalid input.
+  let due: Date;
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(task.dueDate || '');
+  if (dateOnlyMatch) {
+    due = new Date(Number(dateOnlyMatch[1]), Number(dateOnlyMatch[2]) - 1, Number(dateOnlyMatch[3]));
+  } else {
+    due = new Date(task.dueDate);
+  }
+  if (Number.isNaN(due.getTime())) {
+    return {
+      category: 'later',
+      daysRemaining: 999,
+      badgeLabel: 'No due date',
+      badgeColor: 'bg-zinc-500/15 text-zinc-600 dark:text-zinc-400 border-zinc-500/30',
+    };
+  }
   due.setHours(0, 0, 0, 0);
 
   const diffTime = due.getTime() - today.getTime();

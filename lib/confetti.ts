@@ -2,6 +2,8 @@ import confetti from 'canvas-confetti';
 
 export function fireConfetti() {
   try {
+    if (typeof window === 'undefined') return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
     confetti({
       particleCount: 60,
       spread: 70,

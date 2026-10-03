@@ -1,23 +1,21 @@
 'use client';
 
 import React, { useState } from 'react';
-import { 
-  FolderGit2, 
-  Plus, 
-  Trash2, 
-  Star, 
-  ExternalLink, 
-  Search, 
-  FileText, 
-  Video, 
-  Github, 
-  Link, 
-  Tag, 
-  Clock,
-  Filter
+import {
+  FolderGit2,
+  Plus,
+  Trash2,
+  Star,
+  ExternalLink,
+  Search,
+  FileText,
+  Video,
+  Github,
+  Link
 } from 'lucide-react';
 import { Course, MaterialItem, MaterialType } from '@/types';
 import { toggleMaterialFavorite, deleteMaterial, createMaterial } from '@/actions';
+import { useBusy } from '@/hooks/use-busy';
 
 type MaterialsVaultProps = {
   courses: Course[];
@@ -44,35 +42,72 @@ export function MaterialsVault({
   const [tagsStr, setTagsStr] = useState('');
   const [desc, setDesc] = useState('');
 
-  const handleToggleFavorite = async (id: string) => {
-    await toggleMaterialFavorite(id);
-    onRefresh();
-  };
+  const { run } = useBusy();
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Delete this study material link?')) {
-      await deleteMaterial(id);
+  const handleToggleFavorite = (id: string) => run(async () => {
+    try {
+      const res = await toggleMaterialFavorite(id);
+      if (!res.success) {
+        alert(res.error || 'Failed to update');
+        return;
+      }
       onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
     }
+  });
+
+  const handleDelete = (id: string) => {
+    if (!confirm('Delete this study material link?')) return;
+    run(async () => {
+      try {
+        const res = await deleteMaterial(id);
+        if (!res.success) {
+          alert(res.error || 'Failed to delete');
+          return;
+        }
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
   };
 
-  const handleAddSubmit = async (e: React.FormEvent) => {
+  const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    await createMaterial({
-      title,
-      courseId: courseId || courses[0]?.id,
-      type,
-      url,
-      tags: tagsStr.split(',').map((t) => t.trim()).filter(Boolean),
-      description: desc,
-      isFavorite: false,
+    if (!url.trim()) {
+      alert('URL is required');
+      return;
+    }
+    if (/^\s*(javascript|data|vbscript)\s*:/i.test(url)) {
+      alert('Invalid URL');
+      return;
+    }
+    run(async () => {
+      try {
+        const res = await createMaterial({
+          title,
+          courseId: courseId || courses[0]?.id,
+          type,
+          url: url.trim(),
+          tags: Array.from(new Set(tagsStr.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean))).slice(0, 10),
+          description: desc,
+          isFavorite: false,
+        });
+        if (!res.success) {
+          alert(res.error || 'Failed to save material');
+          return;
+        }
+        setIsAddOpen(false);
+        setTitle('');
+        setUrl('');
+        setTagsStr('');
+        setDesc('');
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
     });
-    setIsAddOpen(false);
-    setTitle('');
-    setUrl('');
-    setTagsStr('');
-    setDesc('');
-    onRefresh();
   };
 
   const filteredMaterials = materials.filter((m) => {
@@ -84,7 +119,7 @@ export function MaterialsVault({
       const q = searchQuery.toLowerCase();
       const course = courses.find((c) => c.id === m.courseId);
       const matchesTitle = m.title.toLowerCase().includes(q);
-      const matchesCourse = course?.code.toLowerCase().includes(q) || course?.name.toLowerCase().includes(q);
+      const matchesCourse = (course?.code || '').toLowerCase().includes(q) || (course?.name || '').toLowerCase().includes(q);
       const matchesTags = m.tags.some((t) => t.toLowerCase().includes(q));
       const matchesDesc = (m.description || '').toLowerCase().includes(q);
       if (!matchesTitle && !matchesCourse && !matchesTags && !matchesDesc) return false;
@@ -171,9 +206,11 @@ export function MaterialsVault({
             <option value="PDF">PDF</option>
             <option value="Lecture Slides">Lecture Slides</option>
             <option value="Notes">Notes</option>
+            <option value="Handwritten Notes">Handwritten Notes</option>
             <option value="GitHub">GitHub</option>
             <option value="Video">Video</option>
             <option value="Lab Code">Lab Code</option>
+            <option value="Assignment">Assignment</option>
             <option value="Google Drive">Google Drive</option>
             <option value="External Link">External Link</option>
           </select>
@@ -314,7 +351,7 @@ export function MaterialsVault({
 
       {/* Add Material Modal */}
       {isAddOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 pb-3 border-b border-zinc-100 dark:border-zinc-800">
               Add Study Material to Vault
@@ -365,9 +402,11 @@ export function MaterialsVault({
                     <option value="PDF">PDF</option>
                     <option value="Lecture Slides">Lecture Slides</option>
                     <option value="Notes">Notes</option>
+                    <option value="Handwritten Notes">Handwritten Notes</option>
                     <option value="GitHub">GitHub</option>
                     <option value="Video">Video</option>
                     <option value="Lab Code">Lab Code</option>
+                    <option value="Assignment">Assignment</option>
                     <option value="Google Drive">Google Drive</option>
                     <option value="External Link">External Link</option>
                   </select>

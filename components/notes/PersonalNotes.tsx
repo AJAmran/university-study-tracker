@@ -1,23 +1,21 @@
 'use client';
 
 import React, { useState } from 'react';
-import { 
-  FileText, 
-  Plus, 
-  Trash2, 
-  Pin, 
-  Search, 
-  Edit3, 
-  Tag, 
-  Clock, 
+import {
+  FileText,
+  Plus,
+  Trash2,
+  Pin,
+  Search,
+  Edit3,
   Sparkles,
-  BookOpen,
   Copy,
   Check,
   X
 } from 'lucide-react';
 import { Course, NoteItem } from '@/types';
 import { createNote, updateNote, deleteNote, toggleNotePin } from '@/actions';
+import { useBusy } from '@/hooks/use-busy';
 
 type PersonalNotesProps = {
   courses: Course[];
@@ -37,13 +35,27 @@ export function PersonalNotes({
   const [activeNote, setActiveNote] = useState<NoteItem | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  const handleCopy = (id: string, text: string) => {
+  const handleCopy = async (id: string, text: string) => {
     try {
-      navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(text);
       setCopiedId(id);
       setTimeout(() => setCopiedId(null), 2000);
     } catch {
-      // Ignore clipboard fallback
+      // Fallback for non-HTTPS / denied permission
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setCopiedId(id);
+        setTimeout(() => setCopiedId(null), 2000);
+      } catch {
+        alert('Copy failed — select the text manually');
+      }
     }
   };
 
@@ -73,41 +85,60 @@ export function PersonalNotes({
     setIsEditing(true);
   };
 
-  const handleSave = async (e: React.FormEvent) => {
+  const { run } = useBusy();
+
+  const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
-    if (editId) {
-      await updateNote(editId, {
-        title,
-        courseId,
-        topic,
-        content,
-      });
-    } else {
-      await createNote({
-        title,
-        courseId,
-        topic,
-        content,
-        tags: [],
-        isPinned: false,
-      });
+    if (!courseId && courses.length === 0) {
+      alert('Add a course first before creating notes');
+      return;
     }
-    setIsEditing(false);
-    onRefresh();
+    run(async () => {
+      try {
+        const res = editId
+          ? await updateNote(editId, { title, courseId, topic, content })
+          : await createNote({ title, courseId, topic, content, tags: [], isPinned: false });
+        if (!res.success) {
+          alert(res.error || 'Failed to save note — your content is preserved');
+          return;
+        }
+        setIsEditing(false);
+        onRefresh();
+      } catch {
+        alert('Network error — your content is preserved. Please try again.');
+      }
+    });
   };
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Delete this note?')) {
-      await deleteNote(id);
-      if (activeNote?.id === id) setActiveNote(null);
+  const handleDelete = (id: string) => {
+    if (!confirm('Delete this note?')) return;
+    run(async () => {
+      try {
+        const res = await deleteNote(id);
+        if (!res.success) {
+          alert(res.error || 'Failed to delete note');
+          return;
+        }
+        if (activeNote?.id === id) setActiveNote(null);
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
+  };
+
+  const handleTogglePin = (id: string) => run(async () => {
+    try {
+      const res = await toggleNotePin(id);
+      if (!res.success) {
+        alert(res.error || 'Failed to pin note');
+        return;
+      }
       onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
     }
-  };
-
-  const handleTogglePin = async (id: string) => {
-    await toggleNotePin(id);
-    onRefresh();
-  };
+  });
 
   const filteredNotes = notes.filter((n) => {
     if (selectedCourseId !== 'all' && n.courseId !== selectedCourseId) return false;
@@ -117,7 +148,7 @@ export function PersonalNotes({
       const matchesTitle = n.title.toLowerCase().includes(q);
       const matchesTopic = (n.topic || '').toLowerCase().includes(q);
       const matchesContent = n.content.toLowerCase().includes(q);
-      const matchesCourse = course?.code.toLowerCase().includes(q);
+      const matchesCourse = (course?.code || '').toLowerCase().includes(q);
       if (!matchesTitle && !matchesTopic && !matchesContent && !matchesCourse) return false;
     }
     return true;
@@ -272,7 +303,10 @@ export function PersonalNotes({
                 {/* Footer with AI Study shortcut */}
                 <div className="mt-3 pt-2.5 border-t border-zinc-100 dark:border-zinc-800 flex items-center justify-between text-[11px]">
                   <span className="text-zinc-400">
-                    {new Date(note.updatedAt).toLocaleDateString()}
+                    {(() => {
+                      const d = new Date(note.updatedAt);
+                      return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString();
+                    })()}
                   </span>
 
                   {onSendToAI && (
@@ -293,7 +327,7 @@ export function PersonalNotes({
 
       {/* Note Editor Modal */}
       {isEditing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm">
           <div className="w-full max-w-lg rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 pb-3 border-b border-zinc-100 dark:border-zinc-800">
               {editId ? 'Edit Academic Note' : 'Create Quick Note'}
@@ -382,7 +416,7 @@ export function PersonalNotes({
 
       {/* Full Note Reader Modal */}
       {activeNote && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 backdrop-blur-xs animate-fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 backdrop-blur-sm animate-fade-in">
           <div className="fixed inset-0" onClick={() => setActiveNote(null)} aria-hidden="true" />
           <div className="relative w-full max-w-xl max-h-[88vh] overflow-y-auto rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900 flex flex-col">
             <div className="flex items-start justify-between pb-3 border-b border-zinc-100 dark:border-zinc-800 gap-2">

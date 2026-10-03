@@ -1,23 +1,17 @@
 'use client';
 
-import React, { useState } from 'react';
-import { 
-  Sparkles, 
-  HelpCircle, 
-  FileText, 
-  Layers, 
-  CheckCircle, 
-  Calendar, 
-  Send, 
-  RotateCcw, 
-  BookOpen, 
-  Lightbulb, 
-  Check, 
-  X, 
-  ArrowRight,
-  RefreshCw,
-  Copy,
-  Zap
+import React, { useEffect, useState } from 'react';
+import {
+  Sparkles,
+  HelpCircle,
+  FileText,
+  Layers,
+  CheckCircle,
+  Calendar,
+  Send,
+  Lightbulb,
+  Check,
+  RefreshCw
 } from 'lucide-react';
 import { Course, Flashcard, QuizQuestion, RoutineSlot, TaskItem } from '@/types';
 import { fireConfetti } from '@/lib/confetti';
@@ -74,6 +68,26 @@ export function AIStudyCompanion({
   const [quizAnswers, setQuizAnswers] = useState<Record<number, number>>({});
   const [isQuizLoading, setIsQuizLoading] = useState(false);
   const [quizSubmitted, setQuizSubmitted] = useState(false);
+  const [aiError, setAiError] = useState('');
+
+  // Sync contextual content sent from Notes / Materials (second navigation
+  // previously left stale topics because useState initializers run once)
+  useEffect(() => {
+    if (initialContent) {
+      const snippet = initialContent.slice(0, 2000);
+      setFlashcardTopic(snippet);
+      setQuizTopic(snippet);
+      setSummaryInput(snippet);
+    }
+  }, [initialContent]);
+
+  useEffect(() => {
+    if (initialCourseCode) {
+      const found = courses.find((c) => c.code === initialCourseCode);
+      if (found) setSelectedCourseId(found.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCourseCode]);
 
   // 4. SUMMARIZER STATE
   const [summaryInput, setSummaryInput] = useState(initialContent || '');
@@ -109,11 +123,13 @@ export function AIStudyCompanion({
     setMessages((prev) => [...prev, { role: 'user', text: userText }]);
     setTutorInput('');
     setIsTutorLoading(true);
+    setAiError('');
 
     try {
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'ask',
           payload: {
@@ -126,6 +142,7 @@ export function AIStudyCompanion({
         }),
       });
 
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
       setMessages((prev) => [
         ...prev,
@@ -147,11 +164,14 @@ export function AIStudyCompanion({
     setIsCardsLoading(true);
     setIsCardFlipped(false);
     setActiveCardIndex(0);
+    setMasteredCards([]);
+    setAiError('');
 
     try {
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'flashcards',
           payload: {
@@ -162,12 +182,16 @@ export function AIStudyCompanion({
         }),
       });
 
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
       if (data.flashcards) {
         setFlashcards(data.flashcards);
+      } else if (data.error) {
+        setAiError(data.error);
       }
     } catch (err) {
       console.error(err);
+      setAiError('Failed to generate flashcards. Please try again.');
     } finally {
       setIsCardsLoading(false);
     }
@@ -179,11 +203,13 @@ export function AIStudyCompanion({
     setIsQuizLoading(true);
     setQuizAnswers({});
     setQuizSubmitted(false);
+    setAiError('');
 
     try {
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'quiz',
           payload: {
@@ -193,12 +219,16 @@ export function AIStudyCompanion({
         }),
       });
 
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
       if (data.questions) {
         setQuizQuestions(data.questions);
+      } else if (data.error) {
+        setAiError(data.error);
       }
     } catch (err) {
       console.error(err);
+      setAiError('Failed to generate quiz. Please try again.');
     } finally {
       setIsQuizLoading(false);
     }
@@ -208,11 +238,13 @@ export function AIStudyCompanion({
   const handleSummarize = async () => {
     if (!summaryInput.trim() || isSummarizing) return;
     setIsSummarizing(true);
+    setAiError('');
 
     try {
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'summarize',
           payload: {
@@ -222,10 +254,16 @@ export function AIStudyCompanion({
         }),
       });
 
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
-      setSummaryResult(data);
+      if (data.error && !data.summary) {
+        setAiError(data.error);
+      } else {
+        setSummaryResult(data);
+      }
     } catch (err) {
       console.error(err);
+      setAiError('Failed to summarize. Please try again.');
     } finally {
       setIsSummarizing(false);
     }
@@ -233,7 +271,9 @@ export function AIStudyCompanion({
 
   // 5. Handle Study Plan
   const handleGeneratePlan = async () => {
+    if (isPlanLoading) return;
     setIsPlanLoading(true);
+    setAiError('');
 
     try {
       const pendingTasksList = tasks
@@ -261,6 +301,7 @@ export function AIStudyCompanion({
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'studyPlan',
           payload: {
@@ -270,10 +311,16 @@ export function AIStudyCompanion({
         }),
       });
 
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const data = await res.json();
-      setStudyPlan(data);
+      if (data.error && !data.planOverview) {
+        setAiError(data.error);
+      } else {
+        setStudyPlan(data);
+      }
     } catch (err) {
       console.error(err);
+      setAiError(err instanceof Error && err.name === 'TimeoutError' ? 'Request timed out. Please try again.' : 'Failed to generate study plan. Please try again.');
     } finally {
       setIsPlanLoading(false);
     }
@@ -326,7 +373,7 @@ export function AIStudyCompanion({
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
+              onClick={() => { setActiveTab(tab.id as AITab); setAiError(''); }}
               className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-semibold transition-all flex items-center gap-1.5 ${
                 isSelected
                   ? 'bg-indigo-600 text-white shadow-xs'
@@ -339,6 +386,12 @@ export function AIStudyCompanion({
           );
         })}
       </div>
+
+      {aiError && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300">
+          {aiError}
+        </div>
+      )}
 
       {/* 1. AI TUTOR CHAT */}
       {activeTab === 'tutor' && (
@@ -491,7 +544,7 @@ export function AIStudyCompanion({
                   <button
                     onClick={() => {
                       const id = flashcards[activeCardIndex]?.id;
-                      if (!masteredCards.includes(id)) {
+                      if (id && !masteredCards.includes(id)) {
                         setMasteredCards([...masteredCards, id]);
                       }
                       if (activeCardIndex + 1 < flashcards.length) {
@@ -644,7 +697,10 @@ export function AIStudyCompanion({
                   <button
                     onClick={() => {
                       setQuizSubmitted(true);
-                      fireConfetti();
+                      const correct = quizQuestions.filter((q, i) => quizAnswers[i] === q.correctIndex).length;
+                      if (correct > 0 && correct / quizQuestions.length >= 0.6) {
+                        fireConfetti();
+                      }
                     }}
                     className="rounded-xl bg-blue-600 hover:bg-blue-700 px-4 py-2 text-xs font-bold text-white shadow-xs"
                   >
@@ -871,3 +927,4 @@ export function AIStudyCompanion({
     </div>
   );
 }
+

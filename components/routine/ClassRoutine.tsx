@@ -1,26 +1,20 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { 
-  Calendar as CalendarIcon, 
-  Clock, 
-  MapPin, 
-  User, 
-  Plus, 
-  Trash2, 
-  Sparkles, 
-  Layers, 
-  Compass,
-  Laptop,
-  Image as ImageIcon,
-  Camera,
-  X,
-  Upload,
-  Zap
+import {
+  Calendar as CalendarIcon,
+  Clock,
+  MapPin,
+  User,
+  Plus,
+  Trash2,
+  Sparkles,
+  Camera
 } from 'lucide-react';
-import { Course, RoutineSlot, DayOfWeek, ClassMode } from '@/types';
+import { Course, RoutineSlot, DayOfWeek } from '@/types';
 import { deleteRoutineSlot, recordAttendance } from '@/actions';
 import { useMounted } from '@/hooks/use-mounted';
+import { useBusy, todayLocalDate } from '@/hooks/use-busy';
 import { RoutineUploadModal } from './RoutineUploadModal';
 
 type ClassRoutineProps = {
@@ -65,39 +59,58 @@ export function ClassRoutine({
     ? `${String(new Date().getHours()).padStart(2, '0')}:${String(new Date().getMinutes()).padStart(2, '0')}`
     : '';
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Remove this class slot from your routine?')) {
-      await deleteRoutineSlot(id);
-      onRefresh();
-    }
+  const { run } = useBusy();
+
+  const handleDelete = (id: string) => {
+    if (!confirm('Remove this class slot from your routine?')) return;
+    run(async () => {
+      try {
+        const res = await deleteRoutineSlot(id);
+        if (!res.success) {
+          alert(res.error || 'Failed to delete slot');
+          return;
+        }
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
   };
 
-  const handleQuickAttendance = async (courseId: string, status: 'present' | 'absent') => {
-    await recordAttendance(courseId, status);
-    onRefresh();
-  };
+  const handleQuickAttendance = (courseId: string, status: 'present' | 'absent') => run(async () => {
+    try {
+      const res = await recordAttendance(courseId, status, todayLocalDate());
+      if (!res.success) {
+        alert(res.error || 'Failed to record attendance');
+        return;
+      }
+      onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
+    }
+  });
 
   // Group slots by day
-  const slotsByDay: Record<DayOfWeek, RoutineSlot[]> = {
-    Monday: [],
-    Tuesday: [],
-    Wednesday: [],
-    Thursday: [],
-    Friday: [],
-    Saturday: [],
-    Sunday: [],
-  };
-
-  routine.forEach((slot) => {
-    if (slotsByDay[slot.day]) {
-      slotsByDay[slot.day].push(slot);
-    }
-  });
-
-  // Sort each day chronologically
-  Object.keys(slotsByDay).forEach((dayKey) => {
-    slotsByDay[dayKey as DayOfWeek].sort((a, b) => a.startTime.localeCompare(b.startTime));
-  });
+  const slotsByDay: Record<DayOfWeek, RoutineSlot[]> = useMemo(() => {
+    const grouped: Record<DayOfWeek, RoutineSlot[]> = {
+      Monday: [],
+      Tuesday: [],
+      Wednesday: [],
+      Thursday: [],
+      Friday: [],
+      Saturday: [],
+      Sunday: [],
+    };
+    routine.forEach((slot) => {
+      if (grouped[slot.day]) {
+        grouped[slot.day].push(slot);
+      }
+    });
+    (Object.keys(grouped) as DayOfWeek[]).forEach((dayKey) => {
+      grouped[dayKey].sort((a, b) => a.startTime.localeCompare(b.startTime));
+    });
+    return grouped;
+  }, [routine]);
 
   // This term's timetable only runs Friday and Saturday. Opening the screen on a
   // day with no classes would show an empty list, so default to today when it has
@@ -108,8 +121,7 @@ export function ClassRoutine({
     const activeDays = ALL_DAYS.filter((day) => slotsByDay[day].length > 0);
     const upcoming = activeDays.find((day) => ALL_DAYS.indexOf(day) >= todayIndex);
     return upcoming ?? activeDays[0] ?? currentDay;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routine, currentDay]);
+  }, [currentDay, slotsByDay]);
 
   const selectedDay = userSelectedDay || defaultDay;
 
@@ -280,8 +292,7 @@ export function ClassRoutine({
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     {daySlots.map((slot) => {
                       const course = courses.find((c) => c.id === slot.courseId);
-                      const isOngoing = isToday && currentTimeStr >= slot.startTime && currentTimeStr <= slot.endTime;
-                      const isNext = isToday && currentTimeStr < slot.startTime;
+                      const isOngoing = isToday && currentTimeStr !== '' && currentTimeStr >= slot.startTime && currentTimeStr < slot.endTime;
 
                       return (
                         <div
@@ -408,7 +419,7 @@ export function ClassRoutine({
                             {slot.startTime} - {slot.endTime}
                           </div>
                           <div className="mt-1 text-[10px] text-zinc-600 dark:text-zinc-400 truncate">
-                            {slot.room || course?.room}
+                            {slot.room || course?.room || 'TBA'}
                           </div>
                         </div>
                       );
@@ -422,7 +433,9 @@ export function ClassRoutine({
       )}
 
       {/* AI Routine Upload & Semester Setup Modal */}
+      {/* key remounts on every open so stale extraction/photo state never leaks across sessions */}
       <RoutineUploadModal
+        key={isUploadModalOpen ? 'routine-open' : 'routine-closed'}
         isOpen={isUploadModalOpen}
         onClose={() => setIsUploadModalOpen(false)}
         onRefresh={onRefresh}

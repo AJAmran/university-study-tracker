@@ -153,6 +153,12 @@ export type QuizQuestion = {
   type: 'mcq' | 'conceptual' | 'true_false';
 };
 
+export type SnapshotMeta = {
+  id: string;
+  label: string;
+  createdAt: string;
+};
+
 export type AppData = {
   semesters: Semester[];
   courses: Course[];
@@ -162,6 +168,8 @@ export type AppData = {
   assessments: Assessment[];
   materials: MaterialItem[];
   notes: NoteItem[];
+  /** Auto/manual backup metadata. Never truncated; populated on read only. */
+  snapshots?: SnapshotMeta[];
 };
 
 export type ExtractedRoutineSlot = {

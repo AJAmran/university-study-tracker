@@ -1,6 +1,54 @@
 import { getGeminiClient, AI_MODEL } from './provider';
 import { Flashcard, QuizQuestion, ExtractedRoutineSlot } from '@/types';
 
+const MAX_INPUT = 12000;
+
+function truncate(input: string, max = MAX_INPUT): string {
+  if (!input) return '';
+  return input.length > max ? input.slice(0, max) : input;
+}
+
+function stripCodeFence(raw: string): string {
+  const t = (raw || '').trim();
+  const m = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(t);
+  return m ? m[1].trim() : t;
+}
+
+function safeParseJson<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(stripCodeFence(raw)) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+const AI_TIMEOUT_MS = 90_000;
+const AI_MAX_ATTEMPTS = 3;
+
+/**
+ * Operational wrapper for every Gemini call: hard timeout (no more hung
+ * requests) + retry with backoff on transient failures (429 / 5xx / network).
+ * Non-retryable errors (400, auth, bad-model 404) throw immediately.
+ */
+async function aiCall<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < AI_MAX_ATTEMPTS; attempt++) {
+    try {
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out after ${AI_TIMEOUT_MS / 1000}s`)), AI_TIMEOUT_MS)
+      );
+      return await Promise.race([fn(), timeout]);
+    } catch (e) {
+      lastError = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      const retryable = /429|5\d\d|overloaded|timeout|timed out|fetch failed|ECONNRESET|ETIMEDOUT|network/i.test(msg);
+      if (!retryable || attempt === AI_MAX_ATTEMPTS - 1) throw e;
+      await new Promise((r) => setTimeout(r, 600 * 2 ** attempt));
+    }
+  }
+  throw lastError;
+}
+
 export async function askStudyAssistant(
   question: string,
   context?: {
@@ -19,16 +67,16 @@ Your goals:
 - Be concise, supportive, and exam-focused.
 - If context is provided (course: ${context?.courseCode || 'General'} ${context?.courseName || ''}, topic: ${context?.topic || 'N/A'}), tailor your explanations specifically to that subject level.`;
 
-  const prompt = `${context?.notes ? `Reference Notes from student:\n"""\n${context.notes}\n"""\n\n` : ''}Student Question: ${question}`;
+  const prompt = `${context?.notes ? `Reference Notes from student:\n"""\n${truncate(context.notes, 6000)}\n"""\n\n` : ''}Student Question: ${truncate(question, 5000)}`;
 
-  const response = await ai.models.generateContent({
+  const response = await aiCall('askStudyAssistant', () => ai.models.generateContent({
     model: AI_MODEL,
     contents: prompt,
     config: {
       systemInstruction,
       temperature: 0.7,
     },
-  });
+  }));
 
   return response.text || 'No response generated.';
 }
@@ -57,25 +105,38 @@ Format your response as a valid JSON object matching this schema:
 
 Study Material:
 """
-${content}
+${truncate(content)}
 """`;
 
-  const response = await ai.models.generateContent({
+  const response = await aiCall('summarizeStudyMaterial', () => ai.models.generateContent({
     model: AI_MODEL,
     contents: prompt,
     config: {
       responseMimeType: 'application/json',
       temperature: 0.3,
     },
-  });
+  }));
 
   try {
     const raw = response.text || '{}';
-    return JSON.parse(raw);
+    const parsed = safeParseJson<Record<string, unknown>>(raw, {});
+    if (parsed && typeof parsed.summary === 'string') {
+      return {
+        summary: parsed.summary,
+        keyPoints: Array.isArray(parsed.keyPoints) ? (parsed.keyPoints as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+        definitions: Array.isArray(parsed.definitions)
+          ? (parsed.definitions as Array<{ term?: unknown; definition?: unknown }>)
+              .filter((d) => typeof d?.term === 'string')
+              .map((d) => ({ term: d.term as string, definition: typeof d.definition === 'string' ? d.definition : '' }))
+          : [],
+        examTips: Array.isArray(parsed.examTips) ? (parsed.examTips as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+      };
+    }
+    throw new Error('Invalid summary shape');
   } catch (err) {
     console.error('Failed to parse AI summary JSON:', err);
     return {
-      summary: response.text || 'Summary unavailable.',
+      summary: stripCodeFence(response.text || 'Summary unavailable.').slice(0, 4000),
       keyPoints: ['Review source material directly.'],
       definitions: [],
       examTips: ['Prepare key derivations and definitions.'],
@@ -94,7 +155,7 @@ export async function generateFlashcards(
 Course: ${courseCode || 'General'}
 Content:
 """
-${content}
+${truncate(content)}
 """
 
 Return a JSON array of flashcards with this exact structure:
@@ -107,32 +168,34 @@ Return a JSON array of flashcards with this exact structure:
   }
 ]`;
 
-  const response = await ai.models.generateContent({
+  const response = await aiCall('generateFlashcards', () => ai.models.generateContent({
     model: AI_MODEL,
     contents: prompt,
     config: {
       responseMimeType: 'application/json',
       temperature: 0.4,
     },
-  });
+  }));
 
   try {
     const raw = response.text || '[]';
-    const parsed = JSON.parse(raw);
-    return parsed.map((item: any, idx: number) => ({
-      id: `fc-${Date.now()}-${idx}`,
-      question: item.question || 'Question',
-      answer: item.answer || 'Answer',
+    const parsed = safeParseJson<unknown>(raw, []);
+    if (!Array.isArray(parsed)) throw new Error('Invalid flashcards shape');
+    return (parsed as Array<Record<string, unknown>>).map((item, idx) => ({
+      id: `fc-${Date.now()}-${idx}-${Math.floor(Math.random() * 10000)}`,
+      question: typeof item.question === 'string' && item.question ? item.question : 'Question',
+      answer: typeof item.answer === 'string' && item.answer ? item.answer : 'Answer',
       courseCode: courseCode || '',
-      topic: item.topic || 'General',
+      topic: typeof item.topic === 'string' && item.topic ? item.topic : 'General',
     }));
   } catch (err) {
     console.error('Failed to parse Flashcards JSON:', err);
+    const snippet = truncate(content, 150);
     return [
       {
-        id: `fc-fallback-1`,
+        id: `fc-fallback-${Date.now()}`,
         question: 'What is the primary concept covered?',
-        answer: content.slice(0, 150) + '...',
+        answer: snippet ? snippet + '...' : 'Review source material directly.',
         courseCode,
       },
     ];
@@ -147,7 +210,7 @@ export async function generateQuiz(
 
   const prompt = `Generate ${count} university-level quiz questions (MCQs and conceptual questions) based on this material:
 """
-${content}
+${truncate(content)}
 """
 
 Return a JSON array where each object has:
@@ -158,18 +221,35 @@ Return a JSON array where each object has:
 - "explanation": concise explanation of why the correct answer is right and others are wrong
 - "type": "mcq" or "conceptual" or "true_false"`;
 
-  const response = await ai.models.generateContent({
+  const response = await aiCall('generateQuiz', () => ai.models.generateContent({
     model: AI_MODEL,
     contents: prompt,
     config: {
       responseMimeType: 'application/json',
       temperature: 0.4,
     },
-  });
+  }));
 
   try {
     const raw = response.text || '[]';
-    return JSON.parse(raw);
+    const parsed = safeParseJson<unknown>(raw, []);
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as Array<Record<string, unknown>>)
+      .filter((q) => q && typeof q.question === 'string' && Array.isArray(q.options) && (q.options as unknown[]).length === 4)
+      .slice(0, count)
+      .map((q, idx) => {
+        const options = (q.options as unknown[]).map((o) => String(o)).slice(0, 4);
+        let correctIndex = Number(q.correctIndex);
+        if (!Number.isInteger(correctIndex) || correctIndex < 0 || correctIndex > 3) correctIndex = 0;
+        return {
+          id: typeof q.id === 'string' && q.id ? q.id : `qz-${Date.now()}-${idx}`,
+          question: q.question as string,
+          options,
+          correctIndex,
+          explanation: typeof q.explanation === 'string' ? q.explanation : '',
+          type: q.type === 'true_false' || q.type === 'conceptual' ? (q.type as 'true_false' | 'conceptual') : 'mcq',
+        } as QuizQuestion;
+      });
   } catch (err) {
     console.error('Failed to parse Quiz JSON:', err);
     return [];
@@ -218,18 +298,26 @@ Return JSON matching:
   "proTips": ["Tip 1", "Tip 2", "Tip 3"]
 }`;
 
-  const response = await ai.models.generateContent({
+  const response = await aiCall('generateStudyPlan', () => ai.models.generateContent({
     model: AI_MODEL,
     contents: prompt,
     config: {
       responseMimeType: 'application/json',
       temperature: 0.5,
     },
-  });
+  }));
 
   try {
     const raw = response.text || '{}';
-    return JSON.parse(raw);
+    const parsed = safeParseJson<Record<string, unknown>>(raw, {});
+    if (parsed && typeof parsed.planOverview === 'string') {
+      return {
+        planOverview: parsed.planOverview,
+        dailySchedule: Array.isArray(parsed.dailySchedule) ? (parsed.dailySchedule as Array<{ day: string; focusCourses: string[]; timeSlots: Array<{ time: string; activity: string; priority: string }> }>) : [],
+        proTips: Array.isArray(parsed.proTips) ? (parsed.proTips as unknown[]).filter((x): x is string => typeof x === 'string') : [],
+      };
+    }
+    throw new Error('Invalid plan shape');
   } catch (err) {
     console.error('Failed to parse Study Plan JSON:', err);
     return {
@@ -288,15 +376,21 @@ Return valid JSON conforming to:
   "notes": "Detected X classes"
 }`;
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let contents: any;
 
   if (input.imageBase64) {
+    const cleanBase64 = input.imageBase64.includes(',')
+      ? input.imageBase64.split(',').pop() || ''
+      : input.imageBase64;
+    const allowedMime = ['image/jpeg', 'image/png', 'image/webp'];
+    const mimeType = allowedMime.includes(input.mimeType || '') ? input.mimeType! : 'image/jpeg';
     contents = {
       parts: [
         {
           inlineData: {
-            data: input.imageBase64,
-            mimeType: input.mimeType || 'image/jpeg',
+            data: cleanBase64,
+            mimeType,
           },
         },
         {
@@ -305,40 +399,44 @@ Return valid JSON conforming to:
       ],
     };
   } else {
-    contents = `${instructions}\n\nRoutine Source Text:\n"""\n${input.text || ''}\n"""\n\nPlease parse all classes and periods into JSON.`;
+    contents = `${instructions}\n\nRoutine Source Text:\n"""\n${truncate(input.text || '', 8000)}\n"""\n\nPlease parse all classes and periods into JSON.`;
   }
 
-  const response = await ai.models.generateContent({
+  const response = await aiCall('parseRoutineWithAI', () => ai.models.generateContent({
     model: AI_MODEL,
     contents,
     config: {
       responseMimeType: 'application/json',
       temperature: 0.2,
     },
-  });
+  }));
 
   try {
     const raw = response.text || '{}';
-    const parsed = JSON.parse(raw);
+    const parsed = safeParseJson<{ semesterName?: unknown; slots?: unknown; notes?: unknown }>(raw, {});
+    const validDays = new Set(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']);
+    const timeRe = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/;
     const slots: ExtractedRoutineSlot[] = Array.isArray(parsed.slots)
-      ? parsed.slots.map((s: any) => ({
-          day: s.day || 'Monday',
-          courseCode: (s.courseCode || 'COURSE').toUpperCase().trim(),
-          courseName: s.courseName || s.courseCode || 'Course',
-          credit: typeof s.credit === 'number' ? s.credit : 3.0,
-          startTime: s.startTime || '09:00',
-          endTime: s.endTime || '10:30',
-          room: s.room || '',
-          faculty: s.faculty || '',
-          mode: s.mode === 'Online' || s.mode === 'Hybrid' ? s.mode : 'On Campus',
-          notes: s.notes || '',
-        }))
+      ? (parsed.slots as Array<Record<string, unknown>>)
+          .filter((s) => s && typeof s.courseCode === 'string' && (s.courseCode as string).trim() && validDays.has(s.day as string) && timeRe.test(String(s.startTime || '')) && timeRe.test(String(s.endTime || '')) && String(s.startTime) < String(s.endTime))
+          .map((s) => ({
+            day: s.day as ExtractedRoutineSlot['day'],
+            courseCode: (s.courseCode as string).toUpperCase().trim().slice(0, 50),
+            courseName: (typeof s.courseName === 'string' && s.courseName ? s.courseName : (s.courseCode as string)).slice(0, 120),
+            credit: typeof s.credit === 'number' && Number.isFinite(s.credit) ? Math.min(10, Math.max(0.5, s.credit)) : 3.0,
+            startTime: String(s.startTime),
+            endTime: String(s.endTime),
+            room: typeof s.room === 'string' ? s.room.slice(0, 100) : '',
+            faculty: typeof s.faculty === 'string' ? s.faculty.slice(0, 100) : '',
+            mode: s.mode === 'Online' || s.mode === 'Hybrid' ? s.mode : 'On Campus',
+            notes: typeof s.notes === 'string' ? s.notes.slice(0, 200) : '',
+          }))
       : [];
 
     return {
-      semesterName: parsed.semesterName || 'Semester 1',
+      semesterName: typeof parsed.semesterName === 'string' ? parsed.semesterName.slice(0, 120) : 'Semester 1',
       slots,
-      notes: parsed.notes || `Successfully extracted ${slots.length} classes.`,
+      notes: typeof parsed.notes === 'string' ? parsed.notes.slice(0, 500) : `Successfully extracted ${slots.length} classes.`,
     };
   } catch (err) {
     console.error('Failed to parse AI routine JSON:', err);

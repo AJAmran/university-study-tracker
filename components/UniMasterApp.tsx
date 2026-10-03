@@ -22,12 +22,14 @@ type UniMasterAppProps = {
   initialData: AppData;
 };
 
+export type QuickAddAction = 'task' | 'routine' | 'attendance' | 'mark' | 'material' | 'note';
+
 export function UniMasterApp({ initialData }: UniMasterAppProps) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [isRoutineUploadOpen, setIsRoutineUploadOpen] = useState(false);
-  const [quickAddAction, setQuickAddAction] = useState<any>('task');
+  const [quickAddAction, setQuickAddAction] = useState<QuickAddAction>('task');
 
   // AI contextual transfer from notes/materials
   const [aiContextContent, setAiContextContent] = useState('');
@@ -39,20 +41,28 @@ export function UniMasterApp({ initialData }: UniMasterAppProps) {
     router.refresh();
   };
 
-  const handleOpenQuickAdd = (action: any = 'task') => {
+  const handleOpenQuickAdd = (action: QuickAddAction = 'task') => {
     setQuickAddAction(action);
     setIsQuickAddOpen(true);
   };
 
   const handleResetData = async () => {
-    if (confirm('Reset to the starter Semester 1 data? This clears your tasks, marks, notes and attendance records.')) {
-      await resetDatabase();
-      router.refresh();
+    if (confirm('Reset to the starter Semester 1 data? This clears your tasks, marks, notes and attendance records. A backup is saved automatically and can be restored from Courses.')) {
+      try {
+        const res = await resetDatabase();
+        if (!res.success) {
+          alert('Reset failed — please try again');
+          return;
+        }
+        router.refresh();
+      } catch {
+        alert('Reset failed — please try again');
+      }
     }
   };
 
   const handleSendToAI = (content: string, courseCode?: string) => {
-    setAiContextContent(content);
+    setAiContextContent(content.slice(0, 12000));
     setAiContextCourseCode(courseCode || '');
     setActiveTab('ai');
   };
@@ -113,7 +123,7 @@ export function UniMasterApp({ initialData }: UniMasterAppProps) {
             attendance={initialData.attendance}
             assessments={initialData.assessments}
             materials={initialData.materials}
-            notes={initialData.notes}
+            snapshots={initialData.snapshots ?? []}
             onRefresh={handleRefresh}
           />
         )}
@@ -173,6 +183,7 @@ export function UniMasterApp({ initialData }: UniMasterAppProps) {
 
       {/* Floating Quick Action Modal */}
       <QuickActionModal
+        key={isQuickAddOpen ? quickAddAction : 'closed'}
         isOpen={isQuickAddOpen}
         onClose={() => setIsQuickAddOpen(false)}
         courses={initialData.courses}
@@ -181,7 +192,9 @@ export function UniMasterApp({ initialData }: UniMasterAppProps) {
       />
 
       {/* Routine Timetable AI Scanner & Semester Setup Modal */}
+      {/* key remounts on every open so stale extraction/photo state never leaks across sessions */}
       <RoutineUploadModal
+        key={isRoutineUploadOpen ? 'routine-open' : 'routine-closed'}
         isOpen={isRoutineUploadOpen}
         onClose={() => setIsRoutineUploadOpen(false)}
         onRefresh={handleRefresh}

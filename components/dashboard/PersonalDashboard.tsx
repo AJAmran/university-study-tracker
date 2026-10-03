@@ -30,6 +30,7 @@ import {
 import { toggleTaskComplete, recordAttendance } from '@/actions';
 import { fireConfetti } from '@/lib/confetti';
 import { useMounted } from '@/hooks/use-mounted';
+import { useBusy, todayLocalDate } from '@/hooks/use-busy';
 
 type PersonalDashboardProps = {
   courses: Course[];
@@ -38,7 +39,7 @@ type PersonalDashboardProps = {
   attendance: CourseAttendance[];
   assessments: Assessment[];
   notes?: NoteItem[];
-  onOpenQuickAdd: (action?: any) => void;
+  onOpenQuickAdd: (action?: 'task' | 'routine' | 'attendance' | 'mark' | 'material' | 'note') => void;
   onNavigateTab: (tab: string) => void;
   onRefresh: () => void;
   onOpenRoutineUpload?: () => void;
@@ -90,7 +91,7 @@ export function PersonalDashboard({
 
   if (currentTimeStr) {
     for (const slot of todayClasses) {
-      if (currentTimeStr >= slot.startTime && currentTimeStr <= slot.endTime) {
+      if (currentTimeStr >= slot.startTime && currentTimeStr < slot.endTime) {
         currentClass = slot;
       } else if (currentTimeStr < slot.startTime && !nextClass) {
         nextClass = slot;
@@ -137,26 +138,47 @@ export function PersonalDashboard({
     else laterTasks.push(t);
   });
 
+  const urgentDueCount = todayTasks.length + overdueTasks.length;
+  const urgentStatCount = overdueTasks.length + todayTasks.length + tomorrowTasks.length;
+
   // GPA is only meaningful once at least one assessment mark has been entered.
-  const hasAnyMarks = assessments.some((a) => a.obtainedMarks > 0);
+  const hasAnyMarks = assessments.length > 0;
 
   // Most recently updated pinned note, if the student has any.
   const pinnedNote = notes
     .filter((n) => n.isPinned)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
 
-  const handleToggleTask = async (taskId: string) => {
-    const res = await toggleTaskComplete(taskId);
-    if (res.success && res.task?.status === 'Completed') {
-      fireConfetti();
-    }
-    onRefresh();
-  };
+  const { run } = useBusy();
 
-  const handleQuickAttend = async (courseId: string, status: 'present' | 'absent') => {
-    await recordAttendance(courseId, status);
-    onRefresh();
-  };
+  const handleToggleTask = (taskId: string) => run(async () => {
+    try {
+      const res = await toggleTaskComplete(taskId);
+      if (!res.success) {
+        alert(res.error || 'Failed to update task');
+        return;
+      }
+      if (res.task?.status === 'Completed') {
+        fireConfetti();
+      }
+      onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
+    }
+  });
+
+  const handleQuickAttend = (courseId: string, status: 'present' | 'absent') => run(async () => {
+    try {
+      const res = await recordAttendance(courseId, status, todayLocalDate());
+      if (!res.success) {
+        alert(res.error || 'Failed to record attendance');
+        return;
+      }
+      onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
+    }
+  });
 
   return (
     <div className="space-y-5">
@@ -175,7 +197,7 @@ export function PersonalDashboard({
             </h1>
             <p suppressHydrationWarning className="text-xs sm:text-sm text-zinc-600 dark:text-zinc-400 mt-0.5">
               {todayClasses.length} {todayClasses.length === 1 ? 'class' : 'classes'} scheduled today •{' '}
-              {todayTasks.length + overdueTasks.length} urgent {todayTasks.length + overdueTasks.length === 1 ? 'item' : 'items'} due
+              {urgentDueCount} urgent {urgentDueCount === 1 ? 'item' : 'items'} due (today + overdue)
             </p>
           </div>
 
@@ -310,7 +332,7 @@ export function PersonalDashboard({
                         </span>
                         <span className="flex items-center gap-1">
                           <User className="h-3 w-3 text-zinc-400" />
-                          {nextClass.faculty || course?.faculty}
+                          {nextClass.faculty || course?.faculty || 'Faculty TBA'}
                         </span>
                       </div>
                       {nextClass.notes && (
@@ -405,7 +427,7 @@ export function PersonalDashboard({
             </div>
           </div>
           <div className="flex items-center gap-1 text-xs font-bold text-emerald-600 dark:text-emerald-400 shrink-0">
-            <span className="hidden xs:inline">Open Notes</span>
+            <span className="hidden min-[400px]:inline">Open Notes</span>
             <ArrowRight className="h-3.5 w-3.5" />
           </div>
         </button>
@@ -453,7 +475,7 @@ export function PersonalDashboard({
           </div>
           <div className="mt-1 flex items-baseline gap-1.5">
             <span className="text-xl sm:text-2xl font-black text-zinc-900 dark:text-zinc-100">
-              {overdueTasks.length + todayTasks.length + tomorrowTasks.length}
+              {urgentStatCount}
             </span>
             <span className="text-xs text-zinc-400">pending</span>
           </div>
@@ -495,7 +517,7 @@ export function PersonalDashboard({
         >
           <div className="flex items-center justify-between text-indigo-600 dark:text-indigo-400">
             <span className="text-[11px] font-bold uppercase tracking-wider">AI Study</span>
-            <Sparkles className="h-4 w-4 animate-spin text-indigo-600" />
+            <Sparkles className="h-4 w-4 text-indigo-600" />
           </div>
           <div className="mt-1 flex items-baseline gap-1">
             <span className="text-sm font-bold text-zinc-900 dark:text-zinc-100">
@@ -543,8 +565,8 @@ export function PersonalDashboard({
             <div className="space-y-2">
               {todayClasses.map((slot) => {
                 const course = courses.find((c) => c.id === slot.courseId);
-                const isOngoing = currentTimeStr >= slot.startTime && currentTimeStr <= slot.endTime;
-                const isPast = currentTimeStr > slot.endTime;
+                const isOngoing = currentTimeStr !== '' && currentTimeStr >= slot.startTime && currentTimeStr < slot.endTime;
+                const isPast = currentTimeStr !== '' && currentTimeStr >= slot.endTime;
 
                 return (
                   <div
@@ -588,8 +610,12 @@ export function PersonalDashboard({
 
                       <div className="mt-1 flex flex-wrap items-center gap-3 text-[11px] text-zinc-500 dark:text-zinc-400">
                         <span>Room: {slot.room || course?.room || 'TBA'}</span>
-                        <span>•</span>
-                        <span>{slot.faculty || course?.faculty}</span>
+                        {(slot.faculty || course?.faculty) && (
+                          <>
+                            <span>•</span>
+                            <span>{slot.faculty || course?.faculty}</span>
+                          </>
+                        )}
                       </div>
 
                       {slot.notes && (

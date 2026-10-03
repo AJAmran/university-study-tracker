@@ -1,22 +1,20 @@
 'use client';
 
 import React, { useState } from 'react';
-import { 
-  Award, 
-  Plus, 
-  Trash2, 
-  TrendingUp, 
-  HelpCircle, 
-  Calculator, 
+import {
+  Award,
+  Plus,
+  Trash2,
+  TrendingUp,
   Target,
   BarChart2,
-  CheckCircle2,
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
 import { Course, Assessment, Semester, AssessmentCategory } from '@/types';
-import { calculateCourseGrade, calculateSemesterGPA, marksToGrade } from '@/lib/calculations';
+import { calculateCourseGrade, calculateSemesterGPA } from '@/lib/calculations';
 import { addAssessment, deleteAssessment } from '@/actions';
+import { useBusy } from '@/hooks/use-busy';
 
 type GradeTrackerProps = {
   courses: Course[];
@@ -45,26 +43,57 @@ export function GradeTracker({
 
   const gpaStats = calculateSemesterGPA(courses, assessments);
 
-  const handleAddSubmit = async (e: React.FormEvent) => {
+  const { run } = useBusy();
+
+  const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    await addAssessment({
-      courseId: selCourseId || courses[0]?.id,
-      title,
-      category,
-      obtainedMarks: parseFloat(obtainedMarks) || 0,
-      maxMarks: parseFloat(maxMarks) || 20,
-      weightPercent: parseFloat(weightPercent) || 10,
+    const max = parseFloat(maxMarks);
+    const obtained = parseFloat(obtainedMarks);
+    if (!Number.isFinite(max) || max < 1) {
+      alert('Max marks must be at least 1');
+      return;
+    }
+    if (!Number.isFinite(obtained) || obtained < 0 || obtained > max) {
+      alert(`Obtained marks must be between 0 and ${max}`);
+      return;
+    }
+    run(async () => {
+      try {
+        const res = await addAssessment({
+          courseId: selCourseId || courses[0]?.id,
+          title,
+          category,
+          obtainedMarks: obtained,
+          maxMarks: max,
+          weightPercent: parseFloat(weightPercent) || 0,
+        });
+        if (!res.success) {
+          alert(res.error || 'Failed to save mark');
+          return;
+        }
+        setIsAddOpen(false);
+        setTitle('');
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
     });
-    setIsAddOpen(false);
-    setTitle('');
-    onRefresh();
   };
 
-  const handleDelete = async (id: string) => {
-    if (confirm('Delete this assessment score?')) {
-      await deleteAssessment(id);
-      onRefresh();
-    }
+  const handleDelete = (id: string) => {
+    if (!confirm('Delete this assessment score?')) return;
+    run(async () => {
+      try {
+        const res = await deleteAssessment(id);
+        if (!res.success) {
+          alert(res.error || 'Failed to delete');
+          return;
+        }
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
   };
 
   return (
@@ -100,12 +129,14 @@ export function GradeTracker({
           </div>
           <div className="mt-2 flex items-baseline gap-2">
             <span className="text-3xl font-black text-zinc-900 dark:text-zinc-100">
-              {gpaStats.gpa > 0 ? gpaStats.gpa.toFixed(2) : '3.80'}
+              {gpaStats.gradedCredits > 0 ? gpaStats.gpa.toFixed(2) : '—'}
             </span>
             <span className="text-xs text-zinc-400">/ 4.00</span>
           </div>
           <p className="mt-1 text-[11px] text-zinc-500">
-            Based on {gpaStats.gradedCredits} of {gpaStats.totalCredits} graded credits
+            {gpaStats.gradedCredits > 0
+              ? `Based on ${gpaStats.gradedCredits} of ${gpaStats.totalCredits} graded credits`
+              : 'Add assessment marks to calculate your GPA'}
           </p>
         </div>
 
@@ -260,7 +291,7 @@ export function GradeTracker({
                   ) : (
                     <div className="space-y-1.5">
                       {courseAssessments.map((ass) => {
-                        const pct = Math.round((ass.obtainedMarks / ass.maxMarks) * 100);
+                        const pct = ass.maxMarks > 0 ? Math.round((ass.obtainedMarks / ass.maxMarks) * 100) : 0;
                         const weightedContribution = Math.round((pct / 100) * ass.weightPercent * 10) / 10;
 
                         return (
@@ -307,10 +338,10 @@ export function GradeTracker({
                   )}
 
                   {/* Remaining weight summary */}
-                  <div className="rounded-xl border border-dashed border-zinc-200 p-2.5 text-xs text-zinc-500 dark:border-zinc-800 flex items-center justify-between">
-                    <span>Remaining Unevaluated Weight (Final Exam/Project):</span>
+                  <div className={`rounded-xl border p-2.5 text-xs flex items-center justify-between ${stats.evaluatedWeight > 100 ? 'border-rose-300 bg-rose-50 dark:border-rose-900 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300' : 'border-dashed border-zinc-200 text-zinc-500 dark:border-zinc-800'}`}>
+                    <span>{stats.evaluatedWeight > 100 ? `Over-allocated by ${(Math.round((stats.evaluatedWeight - 100) * 10) / 10)}% — reduce weights:` : 'Remaining Unevaluated Weight (Final Exam/Project):'}</span>
                     <span className="font-bold text-zinc-800 dark:text-zinc-200">
-                      {Math.max(0, 100 - stats.evaluatedWeight)}%
+                      {stats.evaluatedWeight > 100 ? `${Math.round(stats.evaluatedWeight * 10) / 10}%` : `${Math.max(0, 100 - stats.evaluatedWeight)}%`}
                     </span>
                   </div>
                 </div>
@@ -353,7 +384,7 @@ export function GradeTracker({
 
       {/* Add Assessment Modal */}
       {isAddOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
             <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 pb-3 border-b border-zinc-100 dark:border-zinc-800">
               Record Assessment Marks
@@ -389,9 +420,12 @@ export function GradeTracker({
                   >
                     <option value="CT">Class Test (CT)</option>
                     <option value="Assignment">Assignment</option>
+                    <option value="Quiz">Quiz</option>
                     <option value="Midterm">Midterm</option>
                     <option value="Final">Final Exam</option>
                     <option value="Lab">Lab Evaluation / Viva</option>
+                    <option value="Viva">Viva</option>
+                    <option value="Presentation">Presentation</option>
                     <option value="Attendance">Attendance Mark</option>
                     <option value="Other">Other</option>
                   </select>

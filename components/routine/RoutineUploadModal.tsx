@@ -1,25 +1,24 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { 
-  Camera, 
-  Upload, 
-  Sparkles, 
-  Check, 
-  X, 
-  AlertCircle, 
-  FileText, 
-  Calendar, 
-  Clock, 
-  MapPin, 
-  User, 
-  CheckCircle2, 
-  Zap, 
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Camera,
+  Upload,
+  Sparkles,
+  Check,
+  X,
+  AlertCircle,
+  FileText,
+  Clock,
+  MapPin,
+  User,
+  CheckCircle2,
+  Zap,
   RefreshCw,
   Trash2,
   Maximize2
 } from 'lucide-react';
-import { ExtractedRoutineSlot, DayOfWeek, ClassMode } from '@/types';
+import { ExtractedRoutineSlot } from '@/types';
 import { importExtractedRoutine, applyCurrentSemesterPreset } from '@/actions';
 
 type RoutineUploadModalProps = {
@@ -49,31 +48,55 @@ export function RoutineUploadModal({
   const [extractedSemester, setExtractedSemester] = useState('Semester 1');
   const [extractedSlots, setExtractedSlots] = useState<ExtractedRoutineSlot[]>([]);
   const [selectedSlotIndices, setSelectedSlotIndices] = useState<Set<number>>(new Set());
-  const [replaceExisting, setReplaceExisting] = useState(true);
+  const [replaceExisting, setReplaceExisting] = useState(false);
 
   // Action loading state
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      try {
-        const stored = localStorage.getItem('unimaster_routine_photo');
-        if (stored) {
-          setSavedRoutinePhoto(stored);
-        }
-      } catch {
-        // Ignore localStorage issues
+    return () => {
+      // Never fire onClose on an unmounted modal (stale auto-close timer).
+      if (closeTimer.current) clearTimeout(closeTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    try {
+      const stored = localStorage.getItem('unimaster_routine_photo');
+      if (stored) {
+        setSavedRoutinePhoto(stored);
       }
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [isOpen]);
+    } catch {
+      // Ignore localStorage issues
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setAnalysisError('Please choose an image file (JPEG/PNG/WebP).');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setAnalysisError('Image is too large — please use a photo under 5MB.');
+      return;
+    }
 
     setImageMime(file.type || 'image/jpeg');
     const reader = new FileReader();
@@ -108,6 +131,7 @@ export function RoutineUploadModal({
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'parseRoutine',
           payload: {
@@ -125,7 +149,7 @@ export function RoutineUploadModal({
       if (data.slots && data.slots.length > 0) {
         setExtractedSlots(data.slots);
         setExtractedSemester(data.semesterName || 'Semester 1');
-        setSelectedSlotIndices(new Set(data.slots.map((_: any, idx: number) => idx)));
+        setSelectedSlotIndices(new Set(data.slots.map((_: unknown, idx: number) => idx)));
         setSuccessMessage(`AI successfully extracted ${data.slots.length} class periods! Review and click Import.`);
         
         // Also save to device localStorage for future reference
@@ -159,6 +183,7 @@ export function RoutineUploadModal({
       const res = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(90_000),
         body: JSON.stringify({
           action: 'parseRoutine',
           payload: {
@@ -175,7 +200,7 @@ export function RoutineUploadModal({
       if (data.slots && data.slots.length > 0) {
         setExtractedSlots(data.slots);
         setExtractedSemester(data.semesterName || 'Semester 1');
-        setSelectedSlotIndices(new Set(data.slots.map((_: any, idx: number) => idx)));
+        setSelectedSlotIndices(new Set(data.slots.map((_: unknown, idx: number) => idx)));
         setSuccessMessage(`AI parsed ${data.slots.length} classes! Review below and tap Import.`);
       } else {
         setAnalysisError('Could not identify class periods in the text provided. Make sure it contains days and times.');
@@ -218,7 +243,7 @@ export function RoutineUploadModal({
       if (res.success) {
         setSuccessMessage(`Successfully imported ${res.addedSlotsCount} classes into your routine!`);
         onRefresh();
-        setTimeout(() => {
+        closeTimer.current = setTimeout(() => {
           onClose();
         }, 1200);
       } else {
@@ -242,7 +267,7 @@ export function RoutineUploadModal({
       if (res.success) {
         setSuccessMessage('Semester 1 routine timetable loaded successfully!');
         onRefresh();
-        setTimeout(() => {
+        closeTimer.current = setTimeout(() => {
           onClose();
         }, 1200);
       } else {
@@ -268,7 +293,7 @@ export function RoutineUploadModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 p-0 sm:p-4 backdrop-blur-xs animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 p-0 sm:p-4 backdrop-blur-sm animate-fade-in">
       <div 
         className="fixed inset-0" 
         onClick={onClose} 
@@ -430,8 +455,8 @@ export function RoutineUploadModal({
                       </p>
                     </div>
 
-                    <div className="flex flex-col xs:flex-row items-center justify-center gap-2 pt-2">
-                      <label className="w-full xs:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 text-xs font-bold cursor-pointer shadow-xs active:scale-95 transition-all">
+                    <div className="flex flex-col min-[400px]:flex-row items-center justify-center gap-2 pt-2">
+                      <label className="w-full min-[400px]:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 text-xs font-bold cursor-pointer shadow-xs active:scale-95 transition-all">
                         <Camera className="h-4 w-4" />
                         <span>Take Photo / Choose Image</span>
                         <input
@@ -449,7 +474,7 @@ export function RoutineUploadModal({
                             setImagePreview(savedRoutinePhoto);
                             handleAnalyzePhoto(savedRoutinePhoto);
                           }}
-                          className="w-full xs:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 px-3 py-2.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                          className="w-full min-[400px]:w-auto inline-flex items-center justify-center gap-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-800 px-3 py-2.5 text-xs font-semibold text-zinc-800 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700"
                         >
                           <Sparkles className="h-3.5 w-3.5 text-blue-500" />
                           <span>Use Saved Photo</span>
@@ -545,7 +570,7 @@ Saturday:
                   Five periods on Friday, two online periods on Saturday evening. Nothing scheduled Sunday to Thursday.
                 </p>
 
-                <div className="mt-3 grid grid-cols-1 xs:grid-cols-2 gap-2 text-xs">
+                <div className="mt-3 grid grid-cols-1 min-[400px]:grid-cols-2 gap-2 text-xs">
                   <div className="p-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
                     <span className="font-bold text-purple-600 dark:text-purple-400">MAT 0541 1203</span>: Mathematics-II
                     <div className="text-[10px] text-zinc-500">3.0 Cr • RS • Room 701</div>
@@ -634,7 +659,7 @@ Saturday:
           {/* EXTRACTED SLOTS PREVIEW & CONFIRMATION */}
           {extractedSlots.length > 0 && (
             <div className="mt-4 pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-3">
-              <div className="flex flex-col xs:flex-row xs:items-center xs:justify-between gap-2">
+              <div className="flex flex-col min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-between gap-2">
                 <div>
                   <h4 className="text-xs sm:text-sm font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
                     <Sparkles className="h-4 w-4 text-blue-600" />
@@ -692,7 +717,7 @@ Saturday:
                             <span className="font-bold text-zinc-900 dark:text-zinc-100">
                               {slot.courseCode}
                             </span>
-                            <span className="text-zinc-500 truncate max-w-[150px] xs:max-w-[200px]">
+                            <span className="text-zinc-500 truncate max-w-[150px] min-[400px]:max-w-[200px]">
                               {slot.courseName}
                             </span>
                           </div>
@@ -759,3 +784,4 @@ Saturday:
     </div>
   );
 }
+

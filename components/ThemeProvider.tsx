@@ -1,8 +1,19 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
 type Theme = 'light' | 'dark' | 'system';
+
+const VALID_THEMES: Theme[] = ['light', 'dark', 'system'];
+
+function readStoredTheme(): Theme {
+  try {
+    const v = localStorage.getItem('unimaster_theme');
+    return VALID_THEMES.includes(v as Theme) ? (v as Theme) : 'system';
+  } catch {
+    return 'system';
+  }
+}
 
 type ThemeContextType = {
   theme: Theme;
@@ -17,13 +28,13 @@ const ThemeContext = createContext<ThemeContextType>({
 });
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(() => {
-    if (typeof window !== 'undefined') {
-      return (localStorage.getItem('unimaster_theme') as Theme) || 'system';
-    }
-    return 'system';
-  });
+  const [theme, setThemeState] = useState<Theme>('system');
   const [isDark, setIsDark] = useState<boolean>(false);
+
+  // Read localStorage only after mount to avoid SSR hydration mismatch
+  useEffect(() => {
+    setThemeState(readStoredTheme());
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -57,12 +68,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [theme]);
 
   const setTheme = (newTheme: Theme) => {
+    if (!VALID_THEMES.includes(newTheme)) return;
     setThemeState(newTheme);
-    localStorage.setItem('unimaster_theme', newTheme);
+    try {
+      localStorage.setItem('unimaster_theme', newTheme);
+    } catch {
+      // Private mode / quota — theme just won't persist
+    }
   };
 
+  const value = useMemo(() => ({ theme, setTheme, isDark }), [theme, isDark]);
+
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, isDark }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
   );

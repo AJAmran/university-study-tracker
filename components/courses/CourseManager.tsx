@@ -1,22 +1,23 @@
 'use client';
 
 import React, { useState } from 'react';
-import { 
-  BookOpen, 
-  Plus, 
-  MapPin, 
-  User, 
-  Clock, 
-  CheckSquare, 
-  Award, 
-  Trash2, 
-  Edit3, 
+import {
+  BookOpen,
+  Plus,
+  MapPin,
+  User,
+  Clock,
+  CheckSquare,
+  Trash2,
+  Edit3,
   FolderGit2,
-  FileText,
+  History,
+  Save,
   X
 } from 'lucide-react';
-import { Course, CourseAttendance, RoutineSlot, TaskItem, Assessment, MaterialItem, NoteItem } from '@/types';
-import { createCourse, updateCourse, deleteCourse } from '@/actions';
+import { Course, CourseAttendance, RoutineSlot, TaskItem, Assessment, MaterialItem, SnapshotMeta } from '@/types';
+import { createCourse, updateCourse, deleteCourse, backupNow, restoreBackup } from '@/actions';
+import { useBusy } from '@/hooks/use-busy';
 import { calculateAttendanceStats, calculateCourseGrade } from '@/lib/calculations';
 
 type CourseManagerProps = {
@@ -26,7 +27,7 @@ type CourseManagerProps = {
   attendance: CourseAttendance[];
   assessments: Assessment[];
   materials: MaterialItem[];
-  notes: NoteItem[];
+  snapshots?: SnapshotMeta[];
   onRefresh: () => void;
 };
 
@@ -37,7 +38,7 @@ export function CourseManager({
   attendance,
   assessments,
   materials,
-  notes,
+  snapshots = [],
   onRefresh,
 }: CourseManagerProps) {
   const [selectedCourse, setSelectedCourse] = useState<Course | null>(null);
@@ -47,22 +48,24 @@ export function CourseManager({
   // Form states
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
-  const [credit, setCredit] = useState(3);
+  const [credit, setCredit] = useState('3');
   const [faculty, setFaculty] = useState('');
   const [room, setRoom] = useState('');
   const [section, setSection] = useState('A');
   const [color, setColor] = useState('#3b82f6');
   const [notesText, setNotesText] = useState('');
+  const [formError, setFormError] = useState('');
 
   const openAdd = () => {
     setCode('');
     setName('');
-    setCredit(3);
+    setCredit('3');
     setFaculty('');
     setRoom('');
     setSection('A');
     setColor('#3b82f6');
     setNotesText('');
+    setFormError('');
     setIsAddOpen(true);
   };
 
@@ -70,54 +73,138 @@ export function CourseManager({
     setSelectedCourse(course);
     setCode(course.code);
     setName(course.name);
-    setCredit(course.credit);
+    setCredit(String(course.credit));
     setFaculty(course.faculty || '');
     setRoom(course.room || '');
     setSection(course.section || 'A');
     setColor(course.color || '#3b82f6');
     setNotesText(course.notes || '');
+    setFormError('');
     setIsEditOpen(true);
   };
 
-  const handleSaveAdd = async (e: React.FormEvent) => {
+  const { run } = useBusy();
+
+  const handleSaveAdd = (e: React.FormEvent) => {
     e.preventDefault();
-    await createCourse({
-      code,
-      name,
-      credit: Number(credit),
-      faculty,
-      room,
-      section,
-      color,
-      notes: notesText,
+    const creditNum = parseFloat(credit);
+    if (!Number.isFinite(creditNum) || creditNum < 0.5 || creditNum > 10) {
+      setFormError('Credit must be between 0.5 and 10');
+      return;
+    }
+    setFormError('');
+    run(async () => {
+      try {
+        const res = await createCourse({
+          code,
+          name,
+          credit: creditNum,
+          faculty,
+          room,
+          section,
+          color,
+          notes: notesText,
+        });
+        if (!res.success) {
+          setFormError(res.error || 'Failed to save course');
+          return;
+        }
+        setIsAddOpen(false);
+        onRefresh();
+      } catch {
+        setFormError('Network error. Please check your connection and try again.');
+      }
     });
-    setIsAddOpen(false);
-    onRefresh();
   };
 
-  const handleSaveEdit = async (e: React.FormEvent) => {
+  const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedCourse) return;
-    await updateCourse(selectedCourse.id, {
-      code,
-      name,
-      credit: Number(credit),
-      faculty,
-      room,
-      section,
-      color,
-      notes: notesText,
+    const creditNum = parseFloat(credit);
+    if (!Number.isFinite(creditNum) || creditNum < 0.5 || creditNum > 10) {
+      setFormError('Credit must be between 0.5 and 10');
+      return;
+    }
+    setFormError('');
+    run(async () => {
+      try {
+        const res = await updateCourse(selectedCourse.id, {
+          code,
+          name,
+          credit: creditNum,
+          faculty,
+          room,
+          section,
+          color,
+          notes: notesText,
+        });
+        if (!res.success) {
+          setFormError(res.error || 'Failed to save course');
+          return;
+        }
+        setIsEditOpen(false);
+        onRefresh();
+      } catch {
+        setFormError('Network error. Please check your connection and try again.');
+      }
     });
-    setIsEditOpen(false);
-    onRefresh();
   };
 
-  const handleDelete = async (courseId: string) => {
-    if (confirm('Delete this course and its associated classes, tasks, and marks?')) {
-      await deleteCourse(courseId);
-      if (selectedCourse?.id === courseId) setSelectedCourse(null);
+  const handleDelete = (courseId: string) => {
+    if (!confirm('Delete this course and its associated classes, tasks, and marks? A backup is saved automatically and can be restored.')) return;
+    run(async () => {
+      try {
+        const res = await deleteCourse(courseId);
+        if (!res.success) {
+          alert(res.error || 'Failed to delete course');
+          return;
+        }
+        if (selectedCourse?.id === courseId) setSelectedCourse(null);
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
+  };
+
+  const latestBackup = snapshots[0];
+
+  const handleBackup = () => run(async () => {
+    try {
+      const res = await backupNow();
+      if (!res.success) {
+        alert(res.error || 'Backup failed');
+        return;
+      }
       onRefresh();
+    } catch {
+      alert('Network error. Please check your connection and try again.');
     }
+  });
+
+  const handleRestore = () => {
+    if (!latestBackup) {
+      alert('No backup available yet.');
+      return;
+    }
+    if (!confirm(`Restore backup "${latestBackup.label}"? Your current data will be replaced (a pre-restore backup is saved automatically).`)) return;
+    run(async () => {
+      try {
+        const pre = await backupNow();
+        if (!pre.success) {
+          alert(pre.error || 'Could not create safety backup. Restore cancelled.');
+          return;
+        }
+        const res = await restoreBackup(latestBackup.id);
+        if (!res.success) {
+          alert(res.error || 'Restore failed');
+          return;
+        }
+        onRefresh();
+      } catch {
+        alert('Network error. Please check your connection and try again.');
+      }
+    });
   };
 
   const colorOptions = [
@@ -145,16 +232,47 @@ export function CourseManager({
           </p>
         </div>
 
-        <button
-          onClick={openAdd}
-          className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 px-3 py-2 text-xs font-semibold text-white shadow-xs transition-all"
-        >
-          <Plus className="h-4 w-4" />
-          <span>+ Add New Course</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleBackup}
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 active:scale-95 px-3 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-all"
+            title="Save a restorable backup of all your data"
+          >
+            <Save className="h-4 w-4" />
+            <span>Backup</span>
+          </button>
+          <button
+            onClick={handleRestore}
+            disabled={!latestBackup}
+            className="flex items-center justify-center gap-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 active:scale-95 px-3 py-2 text-xs font-semibold text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700 transition-all disabled:opacity-40"
+            title={latestBackup ? `Restore backup from ${new Date(latestBackup.createdAt).toLocaleString()}` : 'No backup available yet'}
+          >
+            <History className="h-4 w-4" />
+            <span>Restore</span>
+          </button>
+          <button
+            onClick={openAdd}
+            className="flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:scale-95 px-3 py-2 text-xs font-semibold text-white shadow-xs transition-all"
+          >
+            <Plus className="h-4 w-4" />
+            <span>+ Add New Course</span>
+          </button>
+        </div>
       </div>
+      {latestBackup && (
+        <p className="text-[11px] text-zinc-400">
+          Latest backup: {latestBackup.label} • {(() => { const d = new Date(latestBackup.createdAt); return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(); })()}
+        </p>
+      )}
 
       {/* Courses Cards Grid */}
+      {courses.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-zinc-200 p-8 text-center dark:border-zinc-800 bg-white dark:bg-zinc-900">
+          <BookOpen className="mx-auto h-8 w-8 text-zinc-400" />
+          <p className="mt-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">No courses yet</p>
+          <p className="text-xs text-zinc-500 mt-1">Add your first course to build your routine, tasks and GPA tracking.</p>
+        </div>
+      ) : (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
         {courses.map((course) => {
           const courseRoutine = routine.filter((r) => r.courseId === course.id);
@@ -170,7 +288,6 @@ export function CourseManager({
           const attStats = calculateAttendanceStats(att);
           const gradeStats = calculateCourseGrade(course.id, assessments);
           const courseMaterials = materials.filter((m) => m.courseId === course.id);
-          const courseNotes = notes.filter((n) => n.courseId === course.id);
 
           return (
             <div
@@ -257,7 +374,7 @@ export function CourseManager({
                         {gradeStats.assessmentsCount > 0 ? gradeStats.gradeInfo.letter : 'N/A'}
                       </span>
                       <span className="text-[10px] text-zinc-400">
-                        {gradeStats.currentPercentage}%
+                        {gradeStats.assessmentsCount > 0 ? `${gradeStats.currentPercentage}%` : '—'}
                       </span>
                     </div>
                   </div>
@@ -285,10 +402,11 @@ export function CourseManager({
           );
         })}
       </div>
+      )}
 
       {/* Add / Edit Course Modal */}
       {(isAddOpen || isEditOpen) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-xs">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center justify-between pb-3 border-b border-zinc-100 dark:border-zinc-800">
               <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100">
@@ -331,11 +449,17 @@ export function CourseManager({
                     max="10"
                     required
                     value={credit}
-                    onChange={(e) => setCredit(Number(e.target.value))}
+                    onChange={(e) => setCredit(e.target.value)}
                     className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-2 text-xs text-zinc-900 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
                   />
                 </div>
               </div>
+
+              {formError && (
+                <div className="rounded-lg bg-rose-50 border border-rose-200 p-2.5 text-xs font-medium text-rose-600 dark:bg-rose-950/60 dark:border-rose-900 dark:text-rose-400">
+                  {formError}
+                </div>
+              )}
 
               <div>
                 <label className="block font-medium text-zinc-700 dark:text-zinc-300 mb-1">

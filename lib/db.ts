@@ -10,6 +10,7 @@ import {
   MaterialItem,
   NoteItem,
   Semester,
+  SnapshotMeta,
 } from '@/types';
 
 /**
@@ -44,21 +45,40 @@ function readConnectionString(): string {
 /**
  * Neon requires TLS. `pg` 8.23 treats an `sslmode` in the URL as verify-full and
  * warns loudly, and `channel_binding` is a libpq-only parameter it cannot parse.
- * Both are stripped here and TLS is requested explicitly instead, with
- * certificate verification left to the connection rather than enforced against a
- * CA that is not installed on every machine this runs on.
+ * Both are stripped here and TLS is requested explicitly instead.
+ *
+ * Certificates ARE verified by default (Neon presents publicly-trusted certs and
+ * Node ships the CA bundle). Only set DB_SSL_INSECURE=true on networks/hosts
+ * where verification is impossible — that re-opens MITM exposure.
  */
 function buildPoolConfig() {
-  const cleaned = readConnectionString()
-    .replace(/[?&]channel_binding=[^&]*/i, '')
-    .replace(/[?&]sslmode=[^&]*/i, '');
+  const raw = readConnectionString();
+  let cleaned = raw;
+  try {
+    const u = new URL(raw);
+    u.searchParams.delete('channel_binding');
+    // Keep sslmode for information but pg handles TLS via `ssl` below;
+    // strip it to avoid the verify-full warning, preserving other params.
+    u.searchParams.delete('sslmode');
+    cleaned = u.toString();
+  } catch {
+    // Fallback for non-standard URLs: strip params textually and clean dangling separators
+    cleaned = raw
+      .replace(/[?&]channel_binding=[^&]*/gi, '')
+      .replace(/[?&]sslmode=[^&]*/gi, '')
+      .replace(/\?&/, '?')
+      .replace(/[?&]$/, '');
+  }
 
   return {
     connectionString: cleaned,
-    ssl: { rejectUnauthorized: false },
+    ssl: process.env.DB_SSL_INSECURE === 'true' ? { rejectUnauthorized: false } : { rejectUnauthorized: true },
     max: 5,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 15_000,
+    // Fail fast on runaway statements instead of hanging the request; Neon
+    // cold-start wake-ups surface here as a retryable error, not a hang.
+    statement_timeout: 20_000,
   };
 }
 
@@ -202,6 +222,16 @@ const SCHEMA_STATEMENTS = [
   `create index if not exists idx_assessments_course on assessments(course_id)`,
   `create index if not exists idx_materials_course on materials(course_id)`,
   `create index if not exists idx_notes_course on notes(course_id)`,
+
+  // Backup snapshots for undoing catastrophic wipes (reset / delete-course).
+  // Deliberately NOT part of ALL_TABLES: snapshots must survive truncates.
+  `create table if not exists snapshots (
+     id            text primary key,
+     label         text not null,
+     created_at    text not null,
+     payload       jsonb not null
+   )`,
+  `create index if not exists idx_snapshots_created on snapshots(created_at desc)`,
 ];
 
 // All tables this app owns, in dependency order. Truncated together on save.
@@ -361,7 +391,18 @@ async function ensureReady(): Promise<void> {
         const { rows } = await client.query('select count(*)::int as n from courses');
         if (rows[0].n === 0) {
           console.log('[db] Empty database detected, seeding Semester 1 starter data.');
-          await writeAll(client, seedData());
+          try {
+            await writeAll(client, seedData());
+          } catch (err) {
+            // Fresh-DB race: two cold instances can both observe zero courses and
+            // seed concurrently; the loser hits PK conflicts on the identical seed
+            // ids. That just means the other instance won — safe to ignore.
+            if ((err as { code?: string })?.code === '23505') {
+              console.log('[db] Seed race lost to another instance, continuing.');
+              return;
+            }
+            throw err;
+          }
         }
       });
     })().catch((err) => {
@@ -553,19 +594,6 @@ function toNumber(value: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function emptyData(): AppData {
-  return {
-    semesters: [],
-    courses: [],
-    routine: [],
-    tasks: [],
-    attendance: [],
-    assessments: [],
-    materials: [],
-    notes: [],
-  };
-}
-
 export async function getAppData(): Promise<AppData> {
   await ensureReady();
 
@@ -593,7 +621,15 @@ export async function getAppData(): Promise<AppData> {
         logsByParent.set(row.attendance_id, list);
       }
 
+      const snapshots = await client
+        .query(`select id, label, created_at from snapshots order by created_at desc limit $1`, [MAX_SNAPSHOTS])
+        .then(({ rows: srows }) =>
+          srows.map((r): SnapshotMeta => ({ id: r.id, label: r.label, createdAt: r.created_at }))
+        )
+        .catch(() => [] as SnapshotMeta[]);
+
       return {
+        snapshots,
         semesters: semesters.rows.map(
           (r): Semester => ({
             id: r.id,
@@ -703,18 +739,11 @@ export async function getAppData(): Promise<AppData> {
 }
 
 export async function saveAppData(data: AppData): Promise<void> {
-  await ensureReady();
-
-  await withClient(async (client) => {
-    try {
-      await client.query('begin');
-      await writeAll(client, data);
-      await client.query('commit');
-    } catch (error) {
-      await client.query('rollback');
-      console.error('Failed to write to Postgres, transaction rolled back:', error);
-      throw error;
-    }
+  await withTransaction(async (client) => {
+    await writeAll(client, data);
+  }).catch((error) => {
+    console.error('Failed to write to Postgres, transaction rolled back:', error);
+    throw error;
   });
 }
 
@@ -724,11 +753,85 @@ export async function resetAppData(): Promise<AppData> {
   return fresh;
 }
 
-/** Closes the pool. Only useful for scripts and tests. */
-export async function closePool(): Promise<void> {
-  if (globalForDb.__unimasterPool) {
-    await globalForDb.__unimasterPool.end();
-    globalForDb.__unimasterPool = undefined;
-  }
-  globalForMigration.__unimasterReady = undefined;
+/**
+ * Runs `fn` inside a single Postgres transaction on one pooled client.
+ * This is the primitive that makes targeted mutations race-safe: SELECT ...
+ * FOR UPDATE inside `fn` serializes concurrent writers, unlike the old
+ * read-everything-then-rewrite-everything pattern.
+ */
+export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  await ensureReady();
+  return withClient(async (client) => {
+    try {
+      await client.query('begin');
+      const result = await fn(client);
+      await client.query('commit');
+      return result;
+    } catch (error) {
+      try {
+        await client.query('rollback');
+      } catch {
+        // Rollback itself failing means the connection is already dead;
+        // the pool will discard it. Nothing more to do here.
+      }
+      throw error;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Backup snapshots (undo for catastrophic wipes)
+// ---------------------------------------------------------------------------
+
+const MAX_SNAPSHOTS = 5;
+
+function snapshotId(): string {
+  return `snap-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+}
+
+/** Captures the current full dataset as a restorable snapshot. */
+export async function createSnapshot(label: string): Promise<{ id: string; label: string }> {
+  const data = await getAppData();
+  // Snapshots must not nest: restoring nests would balloon payload size.
+  const { snapshots: _omit, ...payload } = data;
+  const id = snapshotId();
+  const createdAt = new Date().toISOString();
+  await withTransaction(async (client) => {
+    await client.query(
+      `insert into snapshots (id, label, created_at, payload) values ($1,$2,$3,$4)`,
+      [id, label, createdAt, JSON.stringify(payload)]
+    );
+    // Keep only the newest snapshots; old backups are pruned automatically.
+    await client.query(
+      `delete from snapshots where id not in (
+         select id from snapshots order by created_at desc limit $1
+       )`,
+      [MAX_SNAPSHOTS]
+    );
+  });
+  return { id, label };
+}
+
+export async function listSnapshots(): Promise<SnapshotMeta[]> {
+  await ensureReady();
+  return withClient(async (client) => {
+    const { rows } = await client.query(
+      `select id, label, created_at from snapshots order by created_at desc limit $1`,
+      [MAX_SNAPSHOTS]
+    );
+    return rows.map((r): SnapshotMeta => ({ id: r.id, label: r.label, createdAt: r.created_at }));
+  });
+}
+
+/** Replaces the entire live dataset with a snapshot's payload. */
+export async function restoreSnapshot(id: string): Promise<void> {
+  await withTransaction(async (client) => {
+    const { rows } = await client.query(`select payload from snapshots where id = $1`, [id]);
+    if (rows.length === 0) throw new Error('Backup not found');
+    const payload = rows[0].payload as AppData;
+    if (!payload || !Array.isArray(payload.courses) || !Array.isArray(payload.tasks)) {
+      throw new Error('Backup payload is corrupt');
+    }
+    await writeAll(client, payload);
+  });
 }

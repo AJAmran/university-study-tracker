@@ -8,19 +8,7 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: false,
   },
-  // Allow access to remote image placeholder.
-  images: {
-    remotePatterns: [
-      {
-        protocol: 'https',
-        hostname: 'picsum.photos',
-        port: '',
-        pathname: '/**', // This allows any path under the hostname
-      },
-    ],
-  },
   output: 'standalone',
-  transpilePackages: ['motion'],
   // `pg` does dynamic requires at runtime, which webpack cannot follow. Bundling it
   // fails at request time with "__webpack_modules__[moduleId] is not a function",
   // so it is kept as a real Node require instead.

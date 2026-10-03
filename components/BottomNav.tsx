@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   LayoutDashboard, 
   Calendar, 
@@ -33,8 +33,23 @@ export function BottomNav({
 }: BottomNavProps) {
   const [isMoreOpen, setIsMoreOpen] = useState(false);
 
-  // Active uncompleted tasks
+  useEffect(() => {
+    if (!isMoreOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setIsMoreOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [isMoreOpen]);
+
+  // Active uncompleted tasks (capped for badge display)
   const pendingTasksCount = tasks.filter((t) => t.status !== 'Completed').length;
+  const badgeLabel = pendingTasksCount > 99 ? '99+' : String(pendingTasksCount);
 
   // Attendance warning count
   const warningCount = attendance.filter((a) => {
@@ -54,11 +69,11 @@ export function BottomNav({
     <>
       {/* Mobile More Bottom Sheet */}
       {isMoreOpen && (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-xs lg:hidden animate-fade-in">
-          <div 
-            className="fixed inset-0" 
-            onClick={() => setIsMoreOpen(false)} 
-            aria-hidden="true" 
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm lg:hidden animate-fade-in" role="dialog" aria-modal="true" aria-label="Academic modules">
+          <button
+            className="fixed inset-0 cursor-default"
+            onClick={() => setIsMoreOpen(false)}
+            aria-label="Close menu"
           />
           <div className="relative flex max-h-[85vh] w-full max-w-lg flex-col rounded-t-2xl border-t border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-900">
             <div className="mx-auto mt-2 h-1 w-10 shrink-0 rounded-full bg-zinc-300 dark:bg-zinc-700" />
@@ -76,7 +91,7 @@ export function BottomNav({
               </button>
             </div>
 
-            <div className="mt-3 grid grid-cols-1 gap-2 overflow-y-auto overscroll-contain px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <div className="mt-3 grid grid-cols-1 gap-2 overflow-y-auto overscroll-contain px-4 pb-4">
               {moreItems.map((item) => {
                 const Icon = item.icon;
                 const isSelected = activeTab === item.id;
@@ -125,7 +140,8 @@ export function BottomNav({
           {/* 1. Home */}
           <button
             onClick={() => setActiveTab('dashboard')}
-            className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-0.5 text-[9px] xs:text-[10px] font-medium transition-colors ${
+            aria-current={activeTab === 'dashboard' ? 'page' : undefined}
+            className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-0.5 text-[9px] min-[400px]:text-[10px] font-medium transition-colors ${
               activeTab === 'dashboard'
                 ? 'text-blue-600 dark:text-blue-400 font-bold'
                 : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
@@ -140,7 +156,8 @@ export function BottomNav({
           {/* 2. Routine */}
           <button
             onClick={() => setActiveTab('routine')}
-            className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-0.5 text-[9px] xs:text-[10px] font-medium transition-colors ${
+            aria-current={activeTab === 'routine' ? 'page' : undefined}
+            className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-0.5 text-[9px] min-[400px]:text-[10px] font-medium transition-colors ${
               activeTab === 'routine'
                 ? 'text-blue-600 dark:text-blue-400 font-bold'
                 : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
@@ -155,7 +172,8 @@ export function BottomNav({
           {/* 3. Tasks with Badge */}
           <button
             onClick={() => setActiveTab('tasks')}
-            className={`flex-1 min-w-0 relative flex flex-col items-center justify-center py-1 px-0.5 text-[9px] xs:text-[10px] font-medium transition-colors ${
+            aria-current={activeTab === 'tasks' ? 'page' : undefined}
+            className={`flex-1 min-w-0 relative flex flex-col items-center justify-center py-1 px-0.5 text-[9px] min-[400px]:text-[10px] font-medium transition-colors ${
               activeTab === 'tasks'
                 ? 'text-blue-600 dark:text-blue-400 font-bold'
                 : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
@@ -165,7 +183,7 @@ export function BottomNav({
               <CheckSquare className="h-5 w-5" />
               {pendingTasksCount > 0 && (
                 <span className="absolute -top-0.5 -right-1 flex h-3.5 min-w-[14px] px-0.5 items-center justify-center rounded-full bg-blue-600 text-[8px] font-bold text-white shadow-xs">
-                  {pendingTasksCount}
+                  {badgeLabel}
                 </span>
               )}
             </div>
@@ -175,7 +193,8 @@ export function BottomNav({
           {/* 4. AI Study */}
           <button
             onClick={() => setActiveTab('ai')}
-            className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-0.5 text-[9px] xs:text-[10px] font-medium transition-colors ${
+            aria-current={activeTab === 'ai' ? 'page' : undefined}
+            className={`flex-1 min-w-0 flex flex-col items-center justify-center py-1 px-0.5 text-[9px] min-[400px]:text-[10px] font-medium transition-colors ${
               activeTab === 'ai'
                 ? 'text-blue-600 dark:text-blue-400 font-bold'
                 : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
@@ -190,7 +209,9 @@ export function BottomNav({
           {/* 5. More Menu */}
           <button
             onClick={() => setIsMoreOpen(true)}
-            className={`flex-1 min-w-0 relative flex flex-col items-center justify-center py-1 px-0.5 text-[9px] xs:text-[10px] font-medium transition-colors ${
+            aria-expanded={isMoreOpen}
+            aria-haspopup="dialog"
+            className={`flex-1 min-w-0 relative flex flex-col items-center justify-center py-1 px-0.5 text-[9px] min-[400px]:text-[10px] font-medium transition-colors ${
               moreItems.some((i) => i.id === activeTab)
                 ? 'text-blue-600 dark:text-blue-400 font-bold'
                 : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200'
@@ -199,7 +220,7 @@ export function BottomNav({
             <div className="relative p-1 rounded-lg">
               <Menu className="h-5 w-5" />
               {warningCount > 0 && (
-                <span className="absolute top-0 right-0 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white dark:ring-zinc-950" />
+                <span className="absolute top-0 right-0 h-2 w-2 rounded-full bg-rose-500 ring-2 ring-white dark:ring-zinc-950" role="img" aria-label="Attendance warning" />
               )}
             </div>
             <span className="mt-0.5 truncate max-w-full">More</span>
